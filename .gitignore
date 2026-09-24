@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Label Studio's own runtime data (db, uploaded media)
+/data/
+
+# ML backend runtime data
+backends/*/data/
+
+# Model weights (large binaries -- fetched separately, see README)
+backends/medsam/checkpoints/*.pth
+
+# OS cruft
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Old native-install artifact, superseded by Docker -- safe to delete
+venv/

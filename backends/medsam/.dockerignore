@@ -1,0 +1,17 @@
+# Exclude everything
+**
+
+# Include Dockerfile and docker-compose for reference
+!Dockerfile
+!docker-compose.yml
+
+# Include Python application files
+!*.py
+
+# Include requirements files
+!requirements*.txt
+
+# Include script
+!*.sh
+
+# Checkpoint is intentionally excluded -- mounted at runtime, not baked into the image

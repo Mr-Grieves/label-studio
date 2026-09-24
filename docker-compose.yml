@@ -1,0 +1,97 @@
+version: "3.8"
+
+# Two ways to bring this up, using Compose profiles to pick which backend(s)
+# run alongside Label Studio -- see README.md for the full explanation.
+#
+#   On the Mac (CPU):
+#     docker-compose --profile mac up -d label-studio sam2-backend
+#     docker-compose --profile mac up -d label-studio medsam-backend
+#     (both backends can run at once too -- just list both service names)
+#
+#   On the Linux GPU server:
+#     docker-compose --profile server up -d label-studio sonobase-backend
+#
+# All services share Compose's default network, so backends reach Label
+# Studio at http://label-studio:8080 regardless of which machine this runs
+# on -- no more tracking LAN IPs or host.docker.internal quirks.
+
+services:
+  label-studio:
+    image: heartexlabs/label-studio:latest
+    container_name: label-studio
+    ports:
+      - "8080:8080"
+    volumes:
+      - "./data:/label-studio/data"
+
+  sam2-backend:
+    profiles: ["mac"]
+    container_name: ml-backend-sam2
+    build:
+      context: ./backends/sam2
+    depends_on:
+      - label-studio
+    environment:
+      - LOG_LEVEL=DEBUG
+      - WORKERS=1
+      - THREADS=8
+      - MODEL_DIR=/data/models
+      - DEVICE=cpu
+      - MODEL_CONFIG=configs/sam2.1/sam2.1_hiera_l.yaml
+      - MODEL_CHECKPOINT=sam2.1_hiera_large.pt
+      - LABEL_STUDIO_URL=http://label-studio:8080
+      - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+    ports:
+      - "9090:9090"
+    volumes:
+      - "./backends/sam2/data:/data"
+
+  medsam-backend:
+    profiles: ["mac"]
+    container_name: ml-backend-medsam
+    build:
+      context: ./backends/medsam
+    depends_on:
+      - label-studio
+    environment:
+      - LOG_LEVEL=DEBUG
+      - WORKERS=1
+      - THREADS=8
+      - MODEL_DIR=/data/models
+      - DEVICE=cpu
+      - MODEL_TYPE=vit_b
+      - MODEL_CHECKPOINT=checkpoints/medsam_vit_b.pth
+      - LABEL_STUDIO_URL=http://label-studio:8080
+      - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+    ports:
+      - "9091:9090"
+    volumes:
+      - "./backends/medsam/data:/data"
+      - "./backends/medsam/checkpoints:/app/checkpoints:ro"
+
+  sonobase-backend:
+    profiles: ["server"]
+    container_name: ml-backend-sonobase
+    build:
+      context: ./backends/sonobase
+    depends_on:
+      - label-studio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    environment:
+      - LOG_LEVEL=DEBUG
+      - WORKERS=1
+      - THREADS=8
+      - MODEL_DIR=/data/models
+      - DEVICE=cuda
+      - LABEL_STUDIO_URL=http://label-studio:8080
+      - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+    ports:
+      - "9092:9090"
+    volumes:
+      - "./backends/sonobase/data:/data"
