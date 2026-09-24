@@ -1,23 +1,23 @@
 # Label Studio + interactive segmentation backends
 
 Label Studio plus three interchangeable ML backends for interactive image
-segmentation (SAM2, MedSAM, SonoBase), all run via a single `docker-compose.yml`.
-Both Label Studio and its backends run in Docker now -- nothing needs a native
-Python install or virtualenv anymore.
+segmentation (SAM2, MedSAM, SonoBase), all run via a single `docker-compose.yml`
+on the Linux GPU server. This repo assumes that's the only place it runs --
+there's no CPU/Mac path anymore, everything here expects a GPU.
 
-Label Studio and each backend are run in separate containers:
-the three backends already have very different base images and install steps
-(SAM2 clones facebookresearch/sam2 at build time, MedSAM needs a manually
-downloaded checkpoint, SonoBase clones NVIDIA's nemo-automodel and needs a
-GPU), so cramming any of them into Label Studio's own image would mean running
-multiple long-lived processes in one container via something like supervisord --
-more fragile, and it would stop you from swapping which backend is active
-without rebuilding Label Studio itself too. Keeping them separate but wiring
+Label Studio and each backend run in separate containers: the three backends
+already have very different base images and install steps (SAM2 clones
+facebookresearch/sam2 at build time, MedSAM needs a manually downloaded
+checkpoint, SonoBase clones NVIDIA's nemo-automodel), so cramming any of them
+into Label Studio's own image would mean running multiple long-lived
+processes in one container via something like supervisord -- more fragile,
+and it would stop you from swapping which backend is active without
+rebuilding Label Studio itself too. Keeping them separate but wiring
 everything into one `docker-compose.yml` gets you the "one repo, one command"
-convenience you're after without that downside -- and as a bonus, since Label
-Studio and the backends now share Compose's built-in network, backends reach
-it at `http://label-studio:8080` by service name, on any machine, with no more
-LAN-IP or host.docker.internal juggling.
+convenience without that downside -- and since Label Studio and the backends
+share Compose's built-in network, backends reach it at
+`http://label-studio:8080` by service name, with no LAN-IP or
+host.docker.internal juggling.
 
 ## Setup
 
@@ -81,20 +81,22 @@ setup.
 
 ## Running a backend
 
-**On the Mac** (CPU only):
+Every service requests a GPU (`deploy.resources.reservations.devices`) and
+runs with `DEVICE=cuda` -- there's no CPU fallback to worry about. Bring up
+everything at once:
 
 ```bash
-docker-compose --profile mac up -d label-studio sam2-backend
-# or:
-docker-compose --profile mac up -d label-studio medsam-backend
-# or both at once, to compare:
-docker-compose --profile mac up -d label-studio sam2-backend medsam-backend
+docker-compose up -d
 ```
 
-**On the Linux GPU server:**
+Or just Label Studio plus whichever backend(s) you want running right now,
+to save GPU memory if you're not using all three:
 
 ```bash
-docker-compose --profile server up -d label-studio sonobase-backend
+docker-compose up -d label-studio sam2-backend
+# or:
+docker-compose up -d label-studio medsam-backend sonobase-backend
+# etc.
 ```
 
 Then in Label Studio (Settings -> Machine Learning -> Add Model), use the
@@ -117,9 +119,9 @@ backend is clearly running -- it's not a firewall or startup-order issue.
 
 The published host ports (`localhost:9090` / `9091` / `9092`) are still
 useful, just for a different purpose: hitting a backend directly yourself,
-e.g. `curl http://localhost:9090/health` from a terminal on whichever
-machine it's running on, or through an SSH tunnel to that machine if you're
-elsewhere. Don't put those into the Add Model form.
+e.g. `curl http://localhost:9090/health` from a terminal on the server, or
+through an SSH tunnel to it if you're elsewhere. Don't put those into the Add
+Model form.
 
 ## The three backends, briefly
 
@@ -131,8 +133,9 @@ elsewhere. Don't put those into the Add Model form.
   `Dockerfile`'s comments) and placed at `backends/medsam/checkpoints/medsam_vit_b.pth`
   before building, since that link can't be scripted into the build.
 - **`backends/sonobase/`** -- a newer (Sept. 2026) ultrasound-specific
-  foundation model built on SAM2, supporting both point and box prompts.
-  **GPU-only**, and the integration is less proven than the other two -- see
-  the detailed caveats in `backends/sonobase/Dockerfile` and `model.py`
-  (config-path fallback, heavy NVIDIA dependency, license). Model weights are
-  CC BY-NC 4.0 (non-commercial).
+  foundation model built on SAM2, supporting both point and box prompts. The
+  integration is less proven than the other two -- see the detailed caveats
+  in `backends/sonobase/Dockerfile` and `model.py` (upstream config bakes in
+  a hardcoded checkpoint path from the original author's machine, which we
+  patch around; heavy NVIDIA dependency; license). Model weights are CC
+  BY-NC 4.0 (non-commercial).

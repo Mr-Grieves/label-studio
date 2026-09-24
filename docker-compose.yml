@@ -1,28 +1,20 @@
 version: "3.8"
 
-# Two ways to bring this up, using Compose profiles to pick which backend(s)
-# run alongside Label Studio -- see README.md for the full explanation.
+# Runs entirely on the Linux GPU server -- Label Studio plus all three
+# backends, sharing Compose's default network so backends reach Label
+# Studio at http://label-studio:8080 by service name, and Label Studio
+# reaches each backend at http://<service-name>:9090 (see README.md).
 #
-#   On the Mac (CPU):
-#     docker-compose --profile mac up -d label-studio sam2-backend
-#     docker-compose --profile mac up -d label-studio medsam-backend
-#     (both backends can run at once too -- just list both service names)
+# Bring up everything:
+#   docker-compose up -d
+# Or just Label Studio plus the backend(s) you want running right now:
+#   docker-compose up -d label-studio sam2-backend
 #
-#   On the Linux GPU server:
-#     docker-compose --profile server up -d label-studio sonobase-backend
-#
-# All services share Compose's default network, so backends reach Label
-# Studio at http://label-studio:8080 regardless of which machine this runs
-# on -- no more tracking LAN IPs or host.docker.internal quirks.
-#
-# Every backend also mounts ./images read-only at the SAME path Label Studio
-# serves it from (/label-studio/images) and sets LOCAL_FILES_DOCUMENT_ROOT to
-# match. That lets the ML backend SDK's get_local_path() read task images
-# straight off disk instead of downloading them over HTTP on every inference
-# call. If a task's image URL ever doesn't resolve locally (e.g. you add a
-# new image and haven't re-synced yet), it transparently falls back to
-# downloading it from Label Studio using LABEL_STUDIO_URL + LABEL_STUDIO_API_KEY
-# -- so nothing breaks, it's just slower for that one request.
+# Every backend requests a GPU via deploy.resources.reservations.devices,
+# and every backend also mounts ./images read-only at the same path Label
+# Studio serves it from, with LOCAL_FILES_DOCUMENT_ROOT set to match, so
+# get_local_path() reads task images straight off disk instead of
+# downloading them over HTTP on every inference call (see README.md).
 
 services:
   label-studio:
@@ -43,18 +35,24 @@ services:
       - "./images:/label-studio/images:ro"
 
   sam2-backend:
-    profiles: ["mac"]
     container_name: ml-backend-sam2
     build:
       context: ./backends/sam2
     depends_on:
       - label-studio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
     environment:
       - LOG_LEVEL=DEBUG
       - WORKERS=1
       - THREADS=8
       - MODEL_DIR=/data/models
-      - DEVICE=cpu
+      - DEVICE=cuda
       - MODEL_CONFIG=configs/sam2.1/sam2.1_hiera_l.yaml
       - MODEL_CHECKPOINT=sam2.1_hiera_large.pt
       - LABEL_STUDIO_URL=http://label-studio:8080
@@ -67,18 +65,24 @@ services:
       - "./images:/label-studio/images:ro"
 
   medsam-backend:
-    profiles: ["mac"]
     container_name: ml-backend-medsam
     build:
       context: ./backends/medsam
     depends_on:
       - label-studio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
     environment:
       - LOG_LEVEL=DEBUG
       - WORKERS=1
       - THREADS=8
       - MODEL_DIR=/data/models
-      - DEVICE=cpu
+      - DEVICE=cuda
       - MODEL_TYPE=vit_b
       - MODEL_CHECKPOINT=checkpoints/medsam_vit_b.pth
       - LABEL_STUDIO_URL=http://label-studio:8080
@@ -92,7 +96,6 @@ services:
       - "./images:/label-studio/images:ro"
 
   sonobase-backend:
-    profiles: ["server"]
     container_name: ml-backend-sonobase
     build:
       context: ./backends/sonobase

@@ -14,7 +14,7 @@ from segment_anything import sam_model_registry
 
 ROOT_DIR = os.getcwd()
 
-DEVICE = os.getenv('DEVICE', 'cpu')
+DEVICE = os.getenv('DEVICE', 'cuda')
 # MedSAM's public checkpoint is a fine-tuned SAM ViT-B -- there is no other
 # released model size, so this isn't meant to be swapped like SAM2's configs.
 MODEL_TYPE = os.getenv('MODEL_TYPE', 'vit_b')
@@ -24,9 +24,11 @@ medsam_checkpoint = str(os.path.join(ROOT_DIR, MODEL_CHECKPOINT))
 
 # segment_anything's build_sam_vit_b() loads the checkpoint internally with a
 # bare torch.load() (no map_location), so it assumes whatever device the
-# checkpoint was saved on -- which fails on a CPU-only machine if the
-# checkpoint was saved from a GPU tensor. Build the architecture first, then
-# load the state dict ourselves with an explicit map_location.
+# checkpoint was saved on -- which fails if that doesn't match DEVICE (e.g.
+# a checkpoint saved from a GPU tensor, loaded with no GPU visible). Build
+# the architecture first, then load the state dict ourselves with an
+# explicit map_location, so this works regardless of which device it runs
+# on.
 medsam_model = sam_model_registry[MODEL_TYPE](checkpoint=None)
 state_dict = torch.load(medsam_checkpoint, map_location=torch.device(DEVICE))
 medsam_model.load_state_dict(state_dict)
