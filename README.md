@@ -5,10 +5,7 @@ segmentation (SAM2, MedSAM, SonoBase), all run via a single `docker-compose.yml`
 Both Label Studio and its backends run in Docker now -- nothing needs a native
 Python install or virtualenv anymore.
 
-## Why one container, not several -- and why not *all* in one container either
-
-Label Studio and each backend are still separate containers (that part wasn't
-merged) -- combining them into a single container was considered and dropped:
+Label Studio and each backend are run in separate containers:
 the three backends already have very different base images and install steps
 (SAM2 clones facebookresearch/sam2 at build time, MedSAM needs a manually
 downloaded checkpoint, SonoBase clones NVIDIA's nemo-automodel and needs a
@@ -37,15 +34,50 @@ docker-compose up -d label-studio
 
 Fill that key into `.env` as `LABEL_STUDIO_API_KEY`.
 
-Note: the basic-auth env vars (`BASIC_AUTH_USER`/`PASS`) you may have seen in
-older versions of these backends' docker-compose files don't actually do
-anything -- `start.sh` runs the backend through gunicorn importing `_wsgi.py`
-as a module, which skips the code path in `label-studio-ml-backend` that
-reads those values (it only runs when `_wsgi.py` is executed directly via
-`python`, not imported). So they've been dropped here rather than left in
-looking like a working security control. The backend endpoints are only
-reachable over Compose's internal network plus whatever ports you publish to
-the host -- not a public API with auth in front of it.
+## The ideal workflow: where images live, end to end
+
+**`./images/` is the single source of truth.** Everything else -- Label
+Studio's project, and every backend's view of your pictures -- is derived
+from what's in there. Nothing else should hold a second copy you maintain by
+hand.
+
+1. Drop image files into `./images/` (subfolders are fine).
+2. In Label Studio: your project -> Settings -> Cloud Storage -> Add Source
+   Storage -> **Local Files** -> absolute local path `/label-studio/images`
+   (that's the path *inside* the container -- `./images/` is mounted there by
+   `docker-compose.yml`) -> Test Connection -> **Save & Sync**.
+3. That creates one task per image, referencing it in place -- Label Studio
+   does **not** copy the file into `./data/`. Add more images later and hit
+   Sync again to pick up just the new ones.
+4. Never use the browser's drag-and-drop "Import" button for images that are
+   already in `./images/` -- Import always copies the file into
+   `./data/media/upload/`, which is exactly the duplication you ran into
+   before. Import is only for one-off files you don't want to manage through
+   `./images/` at all.
+
+**How the ML backends reach those same files (the "mounted in a particular
+location" part):** the `label-studio-ml-backend` SDK resolves a task's image
+two possible ways, and it's automatic -- nothing in `model.py` decides this:
+
+- If the image URL is a Local Storage reference (`/data/local-files/?d=...`)
+  *and* the backend container has a file at
+  `$LOCAL_FILES_DOCUMENT_ROOT/<that path>`, it reads it straight off disk.
+  That's why every backend service in `docker-compose.yml` mounts
+  `./images:/label-studio/images:ro` and sets
+  `LOCAL_FILES_DOCUMENT_ROOT=/label-studio/images` -- identical to how
+  `label-studio` itself is set up, so the paths line up and this always
+  hits.
+- If that lookup misses (file not mounted, or not synced yet), it
+  transparently falls back to downloading the image over HTTP from
+  `LABEL_STUDIO_URL`, authenticated with `LABEL_STUDIO_API_KEY` (also already
+  set for every backend), then caches it. So a backend that *isn't* mounted
+  correctly doesn't break -- it just does a slower HTTP round-trip per image
+  instead of a local read. With the mounts in place as shipped here, you get
+  the fast path by default.
+
+Net effect: add an image once to `./images/`, hit Sync in Label Studio once,
+and every backend can already see it -- no separate copying, no per-backend
+setup.
 
 ## Running a backend
 
@@ -85,9 +117,3 @@ tunnel to that machine otherwise.
   the detailed caveats in `backends/sonobase/Dockerfile` and `model.py`
   (config-path fallback, heavy NVIDIA dependency, license). Model weights are
   CC BY-NC 4.0 (non-commercial).
-
-## Cleaning up the old native install
-
-This repo used to run Label Studio natively via a virtualenv. That's no
-longer needed -- `requirements.txt` and the `venv/` folder here are unused
-leftovers, safe to delete whenever you like.

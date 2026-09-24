@@ -14,6 +14,15 @@ version: "3.8"
 # All services share Compose's default network, so backends reach Label
 # Studio at http://label-studio:8080 regardless of which machine this runs
 # on -- no more tracking LAN IPs or host.docker.internal quirks.
+#
+# Every backend also mounts ./images read-only at the SAME path Label Studio
+# serves it from (/label-studio/images) and sets LOCAL_FILES_DOCUMENT_ROOT to
+# match. That lets the ML backend SDK's get_local_path() read task images
+# straight off disk instead of downloading them over HTTP on every inference
+# call. If a task's image URL ever doesn't resolve locally (e.g. you add a
+# new image and haven't re-synced yet), it transparently falls back to
+# downloading it from Label Studio using LABEL_STUDIO_URL + LABEL_STUDIO_API_KEY
+# -- so nothing breaks, it's just slower for that one request.
 
 services:
   label-studio:
@@ -21,8 +30,17 @@ services:
     container_name: label-studio
     ports:
       - "8080:8080"
+    environment:
+      # Lets Label Studio read image files straight from ./images/ (mounted
+      # below) as a Local Storage source, instead of copying every file into
+      # its own data/media/ folder through the browser Import button -- keeps
+      # your source images and Label Studio's internal state in separate
+      # folders. See README.md for the one-time UI setup step.
+      - LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true
+      - LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT=/label-studio/images
     volumes:
       - "./data:/label-studio/data"
+      - "./images:/label-studio/images:ro"
 
   sam2-backend:
     profiles: ["mac"]
@@ -41,10 +59,12 @@ services:
       - MODEL_CHECKPOINT=sam2.1_hiera_large.pt
       - LABEL_STUDIO_URL=http://label-studio:8080
       - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+      - LOCAL_FILES_DOCUMENT_ROOT=/label-studio/images
     ports:
       - "9090:9090"
     volumes:
       - "./backends/sam2/data:/data"
+      - "./images:/label-studio/images:ro"
 
   medsam-backend:
     profiles: ["mac"]
@@ -63,11 +83,13 @@ services:
       - MODEL_CHECKPOINT=checkpoints/medsam_vit_b.pth
       - LABEL_STUDIO_URL=http://label-studio:8080
       - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+      - LOCAL_FILES_DOCUMENT_ROOT=/label-studio/images
     ports:
       - "9091:9090"
     volumes:
       - "./backends/medsam/data:/data"
       - "./backends/medsam/checkpoints:/app/checkpoints:ro"
+      - "./images:/label-studio/images:ro"
 
   sonobase-backend:
     profiles: ["server"]
@@ -91,7 +113,9 @@ services:
       - DEVICE=cuda
       - LABEL_STUDIO_URL=http://label-studio:8080
       - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+      - LOCAL_FILES_DOCUMENT_ROOT=/label-studio/images
     ports:
       - "9092:9090"
     volumes:
       - "./backends/sonobase/data:/data"
+      - "./images:/label-studio/images:ro"

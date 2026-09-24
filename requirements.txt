@@ -1,4 +1,0 @@
-# Label Studio, run locally so the SAM2 ML backend can reach it over localhost.
-# Left unpinned so you get the current release on first install; once it's
-# working, consider freezing it with `pip freeze > requirements.lock.txt`.
-label-studio

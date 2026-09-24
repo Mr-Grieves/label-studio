@@ -4,6 +4,9 @@
 # Label Studio's own runtime data (db, uploaded media)
 /data/
 
+# Your source images -- large binaries, don't belong in git either
+/images/
+
 # ML backend runtime data
 backends/*/data/
 
@@ -17,5 +20,6 @@ backends/medsam/checkpoints/*.pth
 __pycache__/
 *.pyc
 
-# Old native-install artifact, superseded by Docker -- safe to delete
-venv/
+# Staged-for-manual-deletion files (old venv, stale Label Studio data/) --
+# see README.md "./data/ was reset"
+/_to_delete/
