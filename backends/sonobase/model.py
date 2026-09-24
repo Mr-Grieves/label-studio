@@ -35,6 +35,36 @@ MODEL_CONFIG = os.getenv('MODEL_CONFIG', '/sonobase_assets/config.yaml')
 MODEL_CHECKPOINT = os.getenv('MODEL_CHECKPOINT', '/sonobase_assets/sonobase_hiera_b_conv_s_conv_t.pt')
 SONOBASE_SRC = os.getenv('SONOBASE_SRC', '/sonobase/src')
 
+# config.yaml (downloaded above) bakes in an absolute path from the original
+# SonoBase author's own machine for the stock SAM2.1 checkpoint that
+# initializes part of the hybrid image encoder (seen at
+# model.image_encoder.trunk.ckpt_path0, and an unused leftover from their
+# training config at scratch.ckpt_path):
+#   /home/chao/Checkpoints/SAM2/sam2.1_hiera_base_plus.pt
+# That obviously doesn't exist here -- TriBranchTrunk's constructor loads it
+# eagerly, so hydra.utils.instantiate() below raises FileNotFoundError the
+# moment it reaches that node. Rather than recreating someone else's home
+# directory, we download the same official checkpoint ourselves (see
+# Dockerfile) and rewrite every reference to the filename before
+# instantiating.
+SAM2_BASE_PLUS_CHECKPOINT = os.getenv('SAM2_BASE_PLUS_CHECKPOINT', '/sonobase_assets/sam2.1_hiera_base_plus.pt')
+
+
+def _patch_hardcoded_checkpoint_paths(node, needle, replacement):
+    """Recursively rewrite any string leaf under `node` containing `needle`.
+
+    Matches by filename rather than the full original path so it survives
+    the value appearing more than once, or under a slightly different
+    prefix than what we observed.
+    """
+    if isinstance(node, dict):
+        return {k: _patch_hardcoded_checkpoint_paths(v, needle, replacement) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_patch_hardcoded_checkpoint_paths(v, needle, replacement) for v in node]
+    if isinstance(node, str) and needle in node:
+        return replacement
+    return node
+
 
 def _resolve_config_path(path):
     if os.path.exists(path):
@@ -53,7 +83,24 @@ def _resolve_config_path(path):
 
 config_path = _resolve_config_path(MODEL_CONFIG)
 cfg = OmegaConf.load(config_path)
-sonobase_model = hydra.utils.instantiate(cfg, _recursive_=True, _convert_="all")
+
+raw_cfg = OmegaConf.to_container(cfg, resolve=False)
+raw_cfg = _patch_hardcoded_checkpoint_paths(
+    raw_cfg, 'sam2.1_hiera_base_plus.pt', SAM2_BASE_PLUS_CHECKPOINT
+)
+cfg = OmegaConf.create(raw_cfg)
+
+# The same config.yaml also bundles SonoBase's full *training* config
+# (dataset loaders pointing at the author's own dataset directories,
+# augmentation pipelines, etc. under `scratch`/`dataset`) alongside the
+# actual model definition under `model`. We only need the model for
+# inference -- scope instantiation to cfg.model when present so we don't
+# also eagerly construct training-only objects that have nothing to do with
+# serving predictions and could fail (or be slow) for unrelated reasons. If
+# the config doesn't have a top-level `model` key (upstream layout changed),
+# fall back to instantiating the whole thing, same as before.
+model_cfg = cfg.model if 'model' in cfg else cfg
+sonobase_model = hydra.utils.instantiate(model_cfg, _recursive_=True, _convert_="all")
 
 state_dict = torch.load(MODEL_CHECKPOINT, map_location=torch.device(DEVICE), weights_only=True)
 if isinstance(state_dict, dict) and 'model' in state_dict:

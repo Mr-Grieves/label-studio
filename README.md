@@ -97,10 +97,29 @@ docker-compose --profile mac up -d label-studio sam2-backend medsam-backend
 docker-compose --profile server up -d label-studio sonobase-backend
 ```
 
-Then in Label Studio (Settings -> Machine Learning -> Add Model), point at
-`http://localhost:9090` (SAM2), `9091` (MedSAM), or `9092` (SonoBase) -- from
-the browser on whichever machine it's actually running on, or through an SSH
-tunnel to that machine otherwise.
+Then in Label Studio (Settings -> Machine Learning -> Add Model), use the
+Compose **service name**, not `localhost`, and each backend's *internal*
+container port, which is always `9090` regardless of what it's published as
+on the host:
+
+- SAM2: `http://sam2-backend:9090`
+- MedSAM: `http://medsam-backend:9090`
+- SonoBase: `http://sonobase-backend:9090`
+
+This matters because Label Studio's own container is the one making that
+health-check request, not your browser -- `label-studio` and the backend
+containers all share Compose's default network and can already reach each
+other by service name, the same way the backends reach Label Studio at
+`http://label-studio:8080`. `localhost` from inside the `label-studio`
+container means the `label-studio` container itself, which is why
+`http://localhost:9090` fails with connection refused even though the
+backend is clearly running -- it's not a firewall or startup-order issue.
+
+The published host ports (`localhost:9090` / `9091` / `9092`) are still
+useful, just for a different purpose: hitting a backend directly yourself,
+e.g. `curl http://localhost:9090/health` from a terminal on whichever
+machine it's running on, or through an SSH tunnel to that machine if you're
+elsewhere. Don't put those into the Add Model form.
 
 ## The three backends, briefly
 

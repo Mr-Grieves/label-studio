@@ -57,6 +57,17 @@ RUN mkdir -p /sonobase_assets \
     && curl -L -o /sonobase_assets/config.yaml \
          https://huggingface.co/AlfredQin/sonobase/resolve/main/config.yaml
 
+# config.yaml (above) hardcodes an absolute path from the original author's
+# own machine -- /home/chao/Checkpoints/SAM2/sam2.1_hiera_base_plus.pt -- for
+# the stock SAM2.1 checkpoint that initializes part of SonoBase's hybrid
+# image encoder. That file obviously doesn't exist in this image, so we
+# download the same official checkpoint ourselves (identical to how the
+# sam2/ backend fetches its checkpoints via download_ckpts.sh) and rewrite
+# every reference to it in model.py before the model is instantiated -- see
+# the comment there for why.
+RUN curl -L -o /sonobase_assets/sam2.1_hiera_base_plus.pt \
+         https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_base_plus.pt
+
 WORKDIR /app
 COPY . ./
 
