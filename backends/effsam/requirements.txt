@@ -1,0 +1,5 @@
+# TensorFlow 2.20 runs the SavedModels (exported with isonoai's TF 2.18) with the
+# same outputs to ~1e-5, and unlike 2.18 it allows the numpy>=2.2 that
+# label-studio-sdk requires. CPU is enough: ~0.1 s per image, ~20 ms per click.
+tensorflow==2.20.*
+pillow

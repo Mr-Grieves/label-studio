@@ -1,0 +1,19 @@
+# Exclude everything
+**
+
+# Include Dockerfile and docker-compose for reference
+!Dockerfile
+!docker-compose.yml
+
+# Include Python application files
+!*.py
+# ...except the exporter, which runs in the isonoai environment, not here
+export_savedmodel.py
+
+# Include requirements files
+!requirements*.txt
+
+# Include script
+!*.sh
+
+# The SavedModels are intentionally excluded -- mounted at runtime from ./savedmodel
