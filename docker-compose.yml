@@ -1,6 +1,6 @@
 version: "3.8"
 
-# Runs entirely on the Linux GPU server -- Label Studio plus all three
+# Runs entirely on the Linux GPU server -- Label Studio plus all four
 # backends, sharing Compose's default network so backends reach Label
 # Studio at http://label-studio:8080 by service name, and Label Studio
 # reaches each backend at http://<service-name>:9090 (see README.md).
@@ -121,4 +121,28 @@ services:
       - "9092:9090"
     volumes:
       - "./backends/sonobase/data:/data"
+      - "./images:/label-studio/images:ro"
+
+  effsam-backend:
+    container_name: ml-backend-effsam
+    build:
+      context: ./backends/effsam
+    depends_on:
+      - label-studio
+    # CPU only: the model is small enough (~0.1 s per image, ~20 ms per click),
+    # which leaves the GPU to the other backends.
+    environment:
+      - LOG_LEVEL=DEBUG
+      # One worker: the embedding and mask-loopback caches live in the process.
+      - WORKERS=1
+      - THREADS=8
+      # The encoder/ and decoder/ SavedModels from export_savedmodel.py
+      - MODEL_DIR=/models
+      - LABEL_STUDIO_URL=http://label-studio:8080
+      - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+      - LOCAL_FILES_DOCUMENT_ROOT=/label-studio/images
+    ports:
+      - "9093:9090"
+    volumes:
+      - "./backends/effsam/savedmodel:/models:ro"
       - "./images:/label-studio/images:ro"

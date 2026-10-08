@@ -1,14 +1,14 @@
 # Label Studio + interactive segmentation backends
 
-Label Studio plus three interchangeable ML backends for interactive image
+Label Studio plus four interchangeable ML backends for interactive image
 segmentation (SAM2, MedSAM, SonoBase), all run via a single `docker-compose.yml`
 on the Linux GPU server. This repo assumes that's the only place it runs --
 there's no CPU/Mac path anymore, everything here expects a GPU.
 
-Label Studio and each backend run in separate containers: the three backends
+Label Studio and each backend run in separate containers: the backends
 already have very different base images and install steps (SAM2 clones
 facebookresearch/sam2 at build time, MedSAM needs a manually downloaded
-checkpoint, SonoBase clones NVIDIA's nemo-automodel), so cramming any of them
+checkpoint, SonoBase clones NVIDIA's nemo-automodel, effsam runs TensorFlow on CPU), so cramming any of them
 into Label Studio's own image would mean running multiple long-lived
 processes in one container via something like supervisord -- more fragile,
 and it would stop you from swapping which backend is active without
@@ -90,7 +90,7 @@ docker-compose up -d
 ```
 
 Or just Label Studio plus whichever backend(s) you want running right now,
-to save GPU memory if you're not using all three:
+to save GPU memory if you're not using them all:
 
 ```bash
 docker-compose up -d label-studio sam2-backend
@@ -107,6 +107,7 @@ on the host:
 - SAM2: `http://sam2-backend:9090`
 - MedSAM: `http://medsam-backend:9090`
 - SonoBase: `http://sonobase-backend:9090`
+- effsam: `http://effsam-backend:9090`
 
 This matters because Label Studio's own container is the one making that
 health-check request, not your browser -- `label-studio` and the backend
@@ -117,13 +118,13 @@ container means the `label-studio` container itself, which is why
 `http://localhost:9090` fails with connection refused even though the
 backend is clearly running -- it's not a firewall or startup-order issue.
 
-The published host ports (`localhost:9090` / `9091` / `9092`) are still
+The published host ports (`localhost:9090` / `9091` / `9092` / `9093`) are still
 useful, just for a different purpose: hitting a backend directly yourself,
 e.g. `curl http://localhost:9090/health` from a terminal on the server, or
 through an SSH tunnel to it if you're elsewhere. Don't put those into the Add
 Model form.
 
-## The three backends, briefly
+## The backends, briefly
 
 - **`backends/sam2/`** -- Meta's SAM2, general purpose, supports point and box
   prompts. The known-working baseline.
@@ -139,3 +140,25 @@ Model form.
   a hardcoded checkpoint path from the original author's machine, which we
   patch around; heavy NVIDIA dependency; license). Model weights are CC
   BY-NC 4.0 (non-commercial).
+- **`backends/effsam/`** -- our own click-prompted SAM, trained in isonoai.
+  **Click prompts only** (alt-click for background); boxes are ignored. Add it
+  in Label Studio as `http://effsam-backend:9090`.
+  - **Model:** two TF SavedModels, `encoder/` and `decoder/`, in
+    `backends/effsam/savedmodel/` (gitignored, mounted into the container).
+    They need only TensorFlow: no isonoai code, no MLflow. To export a new
+    model, run `backends/effsam/export_savedmodel.py <mlflow run id>` from
+    the isonoai environment, copy its output there, and restart the backend.
+    No rebuild is needed.
+  - **CPU only:** ~0.1 s to embed an image, ~20 ms per click, so it leaves
+    the GPU to the other backends.
+  - **Per click:** each image is embedded once, and each click reruns only
+    the decoder, feeding the previous mask back in as SAM was trained to.
+
+## MedSAM in Keras 3
+
+`medsam_keras/` downloads MedSAM ViT-B and converts it to three standalone
+grayscale-input Keras 3 models: image encoder, prompt encoder and mask
+decoder (TensorFlow 2.18). It also has click-prompt
+fine-tuning helpers (SAM-style corrective clicks with mask loopback), and
+tests that check the model against the PyTorch original and that frozen
+encoder weights stay put during training. See `medsam_keras/README.md`.
