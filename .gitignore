@@ -13,6 +13,7 @@ backends/*/data/
 # Model weights (large binaries -- fetched separately, see README)
 backends/medsam/checkpoints/*.pth
 backends/effsam/savedmodel/
+backends/effsam/.venv/
 
 # MedSAM -> Keras conversion: downloaded PyTorch checkpoint and converted preset
 medsam_keras/checkpoints/

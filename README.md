@@ -124,6 +124,26 @@ e.g. `curl http://localhost:9090/health` from a terminal on the server, or
 through an SSH tunnel to it if you're elsewhere. Don't put those into the Add
 Model form.
 
+## Debugging a backend
+
+To set breakpoints in a backend, run it outside Docker under VS Code's
+debugger, while Label Studio keeps running in Docker. `.vscode/launch.json`
+has a config for effsam:
+
+1. Create the backend's environment: `poetry install` in `backends/effsam`.
+   It goes into `backends/effsam/.venv`, which the debug config uses. This
+   needs the same private-repo Poetry setup as isonoai (see below).
+2. Start **effsam backend (debug)** from VS Code's Run and Debug panel. It
+   listens on port 9094, reads `LABEL_STUDIO_API_KEY` from `.env`, and reads
+   images straight from `./images/`.
+3. In Label Studio, add the model as `http://host.docker.internal:9094`.
+   Label Studio's container can reach the host there because of the
+   `extra_hosts` entry in `docker-compose.yml`. After pulling that change,
+   recreate the container once: `docker-compose up -d label-studio`.
+
+Every click calls `predict()` in `backends/effsam/model.py`. On a remote
+server, do all of this through VS Code's Remote-SSH extension.
+
 ## The backends, briefly
 
 - **`backends/sam2/`** -- Meta's SAM2, general purpose, supports point and box
@@ -151,6 +171,15 @@ Model form.
     No rebuild is needed.
   - **CPU only:** ~0.1 s to embed an image, ~20 ms per click, so it leaves
     the GPU to the other backends.
+  - **Dependencies:** a Poetry project (`pyproject.toml`, `poetry.lock`), like
+    isonoai. `pyconvert` comes from the same private index (`pyisonosw`), so
+    Poetry needs the private-repo plugin and a token, set up once per machine
+    as in isonoai's `docs/dev/contributing.md`:
+    `poetry self add git+https://github.com/clariusmhealth/pypi-private-repo`
+    and `poetry config pypi-token.pyisonosw $(gh auth token)`.
+  - **Building the image** needs that token as a build secret:
+    `PRIVATE_REPO_GH_TOKEN=$(gh auth token) docker compose build effsam-backend`.
+    It's only used during the build, not stored in the image.
   - **Per click:** each image is embedded once, and each click reruns only
     the decoder, feeding the previous mask back in as SAM was trained to.
 

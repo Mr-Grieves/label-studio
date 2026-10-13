@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Runs entirely on the Linux GPU server -- Label Studio plus all four
 # backends, sharing Compose's default network so backends reach Label
 # Studio at http://label-studio:8080 by service name, and Label Studio
@@ -22,6 +20,11 @@ services:
     container_name: label-studio
     ports:
       - "8080:8080"
+    # Lets Label Studio reach a backend running on the host, outside Docker, as
+    # http://host.docker.internal:<port> -- e.g. under the VS Code debugger
+    # (.vscode/launch.json). Docker Desktop has this built in; Linux needs it.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       # Lets Label Studio read image files straight from ./images/ (mounted
       # below) as a Local Storage source, instead of copying every file into
@@ -30,6 +33,16 @@ services:
       # folders. See README.md for the one-time UI setup step.
       - LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true
       - LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT=/label-studio/images
+      # Label Studio (1.23+) refuses ML backend URLs that resolve to private or
+      # loopback addresses, which is every backend here: the Compose service names
+      # resolve to Docker's 172.x network, and host.docker.internal (the debugger,
+      # see README.md) to 192.168.x. Two settings are involved:
+      #   ML_BLOCK_LOCAL_IP       -- the model URL itself, and requests to it
+      #   SSRF_PROTECTION_ENABLED -- the <model URL>/webhook Label Studio creates
+      #                              when a model is added (also imports/exports)
+      # Safe on a self-hosted, trusted machine.
+      - ML_BLOCK_LOCAL_IP=false
+      - SSRF_PROTECTION_ENABLED=false
     volumes:
       - "./data:/label-studio/data"
       - "./images:/label-studio/images:ro"
@@ -127,6 +140,10 @@ services:
     container_name: ml-backend-effsam
     build:
       context: ./backends/effsam
+      # A GitHub token that can read clariusmhealth/pypi-private-repo, for
+      # pyconvert. Build with: PRIVATE_REPO_GH_TOKEN=$(gh auth token) docker compose build effsam-backend
+      secrets:
+        - PRIVATE_REPO_GH_TOKEN
     depends_on:
       - label-studio
     # CPU only: the model is small enough (~0.1 s per image, ~20 ms per click),
@@ -146,3 +163,7 @@ services:
     volumes:
       - "./backends/effsam/savedmodel:/models:ro"
       - "./images:/label-studio/images:ro"
+
+secrets:
+  PRIVATE_REPO_GH_TOKEN:
+    environment: PRIVATE_REPO_GH_TOKEN

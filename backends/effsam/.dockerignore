@@ -10,8 +10,10 @@
 # ...except the exporter, which runs in the isonoai environment, not here
 export_savedmodel.py
 
-# Include requirements files
-!requirements*.txt
+# Include the Poetry project files
+!pyproject.toml
+!poetry.lock
+!poetry.toml
 
 # Include script
 !*.sh
