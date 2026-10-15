@@ -1,0 +1,3 @@
+# Python version matches isonoai (and the pyconvert wheels: cp312)
+python 3.12.12
+poetry 2.4.1

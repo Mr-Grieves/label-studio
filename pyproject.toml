@@ -1,0 +1,39 @@
+[tool.poetry]
+name = "tsam-backend"
+version = "0.1.0"
+description = "Label Studio ML backend for isonoai's click-prompted SAM (T-SAM)"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "~3.12"
+gunicorn = "22.0.0"
+label-studio-ml = { git = "https://github.com/HumanSignal/label-studio-ml-backend.git" }
+pillow = "*"
+# TF 2.20 runs the SavedModels (exported with isonoai's TF 2.18) with the same
+# outputs to ~1e-5, and unlike 2.18 allows the numpy>=2.2 label-studio-sdk needs.
+tensorflow = "2.20.*"
+# Same versions as isonoai, which trains and logs the model: mlflow loads it from
+# the training run, and Keras rebuilds it with the version that saved it.
+keras = "3.10.0"
+mlflow = "3.15.1"
+# Reads the prescan images and blob JSONs from S3
+boto3 = "^1.43"
+opencv-python-headless = ">=4.12,<4.13"  # label-studio-sdk caps <4.13
+# Clarius's private package, pinned to isonoai's version (see the source below).
+pyconvert = { version = "13.2.0.dev20260818114904+f86fbc6f33", source = "pyisonosw" }
+
+# Same private index as isonoai: GitHub release assets on
+# clariusmhealth/pypi-private-repo, read through its Poetry plugin. Set up once
+# per machine (isonoai's docs/dev/contributing.md):
+#   poetry self add git+https://github.com/clariusmhealth/pypi-private-repo
+#   poetry config pypi-token.pyisonosw $(gh auth token)
+# "explicit" (isonoai uses "primary"): only packages that name this source are
+# looked up there, so everything else resolves from PyPI without GitHub API calls.
+[[tool.poetry.source]]
+name = "pyisonosw"
+url = "https://github.com/clariusmhealth/pypi-private-repo"
+priority = "explicit"
+
+[build-system]
+build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core>=1.0.0"]

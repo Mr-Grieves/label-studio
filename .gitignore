@@ -1,23 +1,6 @@
 # Secrets
 .env
-
-# Label Studio's own runtime data (db, uploaded media)
-/data/
-
-# Your source images -- large binaries, don't belong in git either
-/images/
-
-# ML backend runtime data
-backends/*/data/
-
-# Model weights (large binaries -- fetched separately, see README)
-backends/medsam/checkpoints/*.pth
-backends/effsam/savedmodel/
-backends/effsam/.venv/
-
-# MedSAM -> Keras conversion: downloaded PyTorch checkpoint and converted preset
-medsam_keras/checkpoints/
-medsam_keras/medsam_vit_b_keras/
+.venv
 
 # OS cruft
 .DS_Store
@@ -25,7 +8,3 @@ medsam_keras/medsam_vit_b_keras/
 # Python
 __pycache__/
 *.pyc
-
-# Staged-for-manual-deletion files (old venv, stale Label Studio data/) --
-# see README.md "./data/ was reset"
-/_to_delete/
