@@ -1,8 +1,9 @@
 """isonoai's SAM, copied from isonoai/models/sam.py: just what Keras needs to load a trained SAM from MLflow.
 
 Every class keeps its `isonoai` registration name -- the saved model refers to them by it -- and their code is
-unchanged, so keep them in sync with isonoai if the architecture changes. Training-only parts (building a SAM from
-a backbone run, freezing the backbone) are left out.
+unchanged, so keep them in sync with isonoai if the architecture changes: they must match the code that trained the
+model being loaded. Currently isonoai's box-only SAM (a box in; no clicks, no mask prompt). Building a SAM from a
+backbone run is left out; `freeze_backbone` stays, since `SAM` calls it when it's built.
 """
 
 from __future__ import annotations
@@ -13,7 +14,12 @@ from typing import Any
 import keras
 import tensorflow as tf
 
-from tsam.utils.model_layers import AddCLSToken, AddPositionalEmbeddings, Mlp, TransformerBlock
+from tsam.utils.model_layers import (
+    AddCLSToken,
+    AddPositionalEmbeddings,
+    Mlp,
+    TransformerBlock,
+)
 
 # The pretrained ViT's layers aren't registered with Keras, so every load of a saved SAM needs them
 VIT_LAYERS = {
@@ -27,59 +33,60 @@ CONV_LAYERNORM_EPS = 1e-6  # prompt encoder's mask downscaler and mask decoder's
 TRANSFORMER_LAYERNORM_EPS = 1e-5  # mask decoder's two-way transformer
 
 
+def _fourier_features(coords: tf.Tensor, gaussian_matrix: tf.Tensor) -> tf.Tensor:
+    """SAM's random Fourier positional encoding of (x, y) coordinates in [0, 1]: (..., 2) -> (..., 2 * frequencies)."""
+    projected = keras.ops.matmul(2.0 * coords - 1.0, gaussian_matrix) * (2.0 * math.pi)
+    return keras.ops.concatenate([keras.ops.sin(projected), keras.ops.cos(projected)], axis=-1)
+
+
 @keras.saving.register_keras_serializable(package="isonoai")
 class SAM(keras.Model):
     """The full SAM model: image encoder, prompt encoder and mask decoder, each reachable as an attribute.
 
-    Built as a functional model of the zero-shot pass (`images` and `points` in, `masks` and `iou` out), so it can
-    be exported as is. Interactive rounds embed the image once with `image_encoder`, then call `decode` once per round.
+    Built as a functional model of the whole pass, so it can be exported as is: `images` (B, S, S, 1) and `boxes`
+    (B, 4) in, as (x0, y0, x1, y1) pixels; the `mask` logits (B, 4E, 4E) and its predicted `iou` (B,), an unbounded
+    regression, out.
 
     Args:
         image_encoder: Maps images (B, H, W, 1) to embeddings (B, E, E, dim).
         prompt_encoder: A `PromptEncoder`.
         mask_decoder: A `MaskDecoder`.
+        backbone_trainable: Whether the image encoder's pretrained patch embedder and ViT train; if not, only its neck
+            does. Saved with the model, so a reloaded model trains the same parts.
     """
 
     MODULES = ("image_encoder", "prompt_encoder", "mask_decoder")
 
     def __init__(
-        self, image_encoder: keras.Model, prompt_encoder: PromptEncoder, mask_decoder: MaskDecoder, **kwargs
+        self,
+        image_encoder: keras.Model,
+        prompt_encoder: PromptEncoder,
+        mask_decoder: MaskDecoder,
+        backbone_trainable: bool = False,
+        **kwargs,
     ) -> None:
-        # Zero-shot mode: the clicks alone, all foreground, no mask prompt.
         size = prompt_encoder.input_image_size
-        inputs = {
-            "images": keras.Input((size, size, 1), name="images"),
-            "points": keras.Input((None, 2), name="points"),
-        }
-        labels = keras.ops.ones_like(inputs["points"][:, :, 0])
-        embeddings = image_encoder(inputs["images"])
-        masks, iou = _decode(prompt_encoder, mask_decoder, embeddings, inputs["points"], labels)
-        super().__init__(inputs=inputs, outputs={"mask": masks, "iou": iou}, **kwargs)
+        inputs = {"images": keras.Input((size, size, 1), name="images"), "boxes": keras.Input((4,), name="boxes")}
+        prompts = prompt_encoder({"boxes": inputs["boxes"]})
+        outputs = mask_decoder({"image_embeddings": image_encoder(inputs["images"]), **prompts})
+        super().__init__(inputs=inputs, outputs={"mask": outputs["mask"][:, 0], "iou": outputs["iou"][:, 0]}, **kwargs)
 
         self.image_encoder = image_encoder
         self.prompt_encoder = prompt_encoder
         self.mask_decoder = mask_decoder
-
-    def decode(
-        self, embeddings: tf.Tensor, points: tf.Tensor, labels: tf.Tensor, pred_mask: tf.Tensor | None = None
-    ) -> tuple[tf.Tensor, tf.Tensor]:
-        """One prompt round: predict the mask from the image embeddings, the clicks so far and the last prediction.
-
-        Args:
-            embeddings: (B, E, E, dim), from `image_encoder`.
-            points: (B, N, 2), the clicks in pixels of the input frame.
-            labels: (B, N), 1 for foreground clicks, 0 for background.
-            pred_mask: (B, 4E, 4E), the previous round's mask logits, or None for no mask prompt.
-
-        Returns:
-            The mask logits (B, 4E, 4E) and its predicted IoU with the ground truth (B,), an unbounded regression.
-        """
-        return _decode(self.prompt_encoder, self.mask_decoder, embeddings, points, labels, pred_mask)
+        self.backbone_trainable = backbone_trainable
+        if not backbone_trainable:
+            freeze_backbone(image_encoder)  # Here, not left to Keras: it doesn't restore a nested model's `trainable`
 
     def get_config(self) -> dict[str, Any]:
         """Return serialisable model config: the modules, not the functional graph built from them."""
         modules = {name: keras.saving.serialize_keras_object(getattr(self, name)) for name in self.MODULES}
-        return {"name": self.name, "trainable": self.trainable, **modules}
+        return {
+            "name": self.name,
+            "trainable": self.trainable,
+            "backbone_trainable": self.backbone_trainable,
+            **modules,
+        }
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> SAM:
@@ -89,25 +96,12 @@ class SAM(keras.Model):
         return cls(**modules, **config)
 
 
-def _decode(
-    prompt_encoder: PromptEncoder,
-    mask_decoder: MaskDecoder,
-    embeddings: tf.Tensor,
-    points: tf.Tensor,
-    labels: tf.Tensor,
-    pred_mask: tf.Tensor | None = None,
-) -> tuple[tf.Tensor, tf.Tensor]:
-    """`SAM.decode`, also used to build `SAM`'s graph before its modules are attributes. Uses `keras.ops` only, so it
-    runs on symbolic inputs as well as tensors."""
-    prompts = {
-        # SAM pads the clicks with a not-a-point when there are no box prompts.
-        "points": keras.ops.concatenate([points, keras.ops.zeros_like(points[:, :1])], axis=1),
-        "labels": keras.ops.concatenate([labels, -keras.ops.ones_like(labels[:, :1])], axis=1),
-    }
-    if pred_mask is not None:
-        prompts["masks"] = keras.ops.expand_dims(pred_mask, -1)
-    outputs = mask_decoder({"image_embeddings": embeddings, **prompt_encoder(prompts)})
-    return outputs["mask"][:, 0], outputs["iou"][:, 0]
+def freeze_backbone(image_encoder: keras.Model) -> None:
+    """Freeze the image encoder's pretrained patch embedder and ViT, leaving only the neck to train."""
+    for layer in image_encoder.layers:
+        layer.trainable = layer.name == "sam_neck"
+        for variable in layer.weights:  # On reload, the ViT's blocks create their variables after `trainable` is set
+            variable.trainable = layer.trainable
 
 
 @keras.saving.register_keras_serializable(package="isonoai")
@@ -163,91 +157,49 @@ class SamNeck(keras.layers.Layer):
         return x
 
 
-def _fourier_features(coords: tf.Tensor, gaussian_matrix: tf.Tensor) -> tf.Tensor:
-    """SAM's random Fourier positional encoding of (x, y) coordinates in [0, 1]: (..., 2) -> (..., 2 * frequencies)."""
-    projected = keras.ops.matmul(2.0 * coords - 1.0, gaussian_matrix) * (2.0 * math.pi)
-    return keras.ops.concatenate([keras.ops.sin(projected), keras.ops.cos(projected)], axis=-1)
-
-
 @keras.saving.register_keras_serializable(package="isonoai")
-class PromptEncoder(keras.Model):  # pylint: disable=too-many-instance-attributes
-    """SAM's prompt encoder, for point prompts and an optional mask prompt.
+class PromptEncoder(keras.Model):
+    """SAM's prompt encoder, for box prompts only (as in MedSAM).
 
-    Its dict inputs and outputs follow keras-hub's `SAMPromptEncoder`, without box prompts.
+    A box is encoded as SAM encodes one: its two corners, each a positional encoding plus a learned corner embedding.
+    There is no mask prompt, so the dense embedding is SAM's learned "no mask" embedding everywhere.
 
     Args:
         dim: Embedding width.
-        input_image_size: Size of the (square) frame the point coordinates are given in.
-        embedding_size: Size of the (square) image embedding grid. Mask prompts are 4x this.
-        mask_in_channels: Channels inside the mask downscaler.
+        input_image_size: Size of the (square) frame the box coordinates are given in.
+        embedding_size: Size of the (square) image embedding grid.
     """
 
-    def __init__(
-        self,
-        dim: int = 256,
-        input_image_size: int = 256,
-        embedding_size: int = 64,
-        mask_in_channels: int = 16,
-        **kwargs,
-    ) -> None:
+    def __init__(self, dim: int = 256, input_image_size: int = 256, embedding_size: int = 64, **kwargs) -> None:
         super().__init__(**kwargs)
         self.dim = dim
         self.input_image_size = input_image_size
         self.embedding_size = embedding_size
-        self.mask_in_channels = mask_in_channels
 
         normal = keras.initializers.RandomNormal(stddev=1.0)
         self.gaussian_matrix = self.add_weight(
             name="gaussian_matrix", shape=(2, dim // 2), initializer=normal, trainable=False
         )
-        self.foreground_embed = self.add_weight(name="foreground_embed", shape=(dim,), initializer=normal)
-        self.background_embed = self.add_weight(name="background_embed", shape=(dim,), initializer=normal)
-        self.not_a_point_embed = self.add_weight(name="not_a_point_embed", shape=(dim,), initializer=normal)
+        self.corner_embeds = self.add_weight(name="corner_embeds", shape=(2, dim), initializer=normal)  # [TL, BR]
         self.no_mask_embed = self.add_weight(name="no_mask_embed", shape=(dim,), initializer=normal)
-
-        self.mask_downscaler = keras.Sequential(
-            [
-                keras.layers.Conv2D(mask_in_channels // 4, 2, strides=2),
-                keras.layers.LayerNormalization(epsilon=CONV_LAYERNORM_EPS),
-                keras.layers.Activation("gelu"),
-                keras.layers.Conv2D(mask_in_channels, 2, strides=2),
-                keras.layers.LayerNormalization(epsilon=CONV_LAYERNORM_EPS),
-                keras.layers.Activation("gelu"),
-                keras.layers.Conv2D(dim, 1),
-            ],
-            name="mask_downscaler",
-        )
-        self.mask_downscaler.build((None, 4 * embedding_size, 4 * embedding_size, 1))
         self.built = True
 
     def call(self, inputs: dict[str, tf.Tensor]) -> dict[str, tf.Tensor]:
         """Embed the prompts.
 
         Args:
-            inputs: A dictionary containing the following keys:
-                - `points` (B, N, 2), (x, y) in pixels of the input frame
-                - `labels` (B, N): 1 foreground, 0 background, -1 padding
-                - `masks` (B, 4E, 4E, 1) mask logits; omit for no mask prompt.
+            inputs: A dictionary with `boxes` (B, 4): (x0, y0, x1, y1) in pixels of the input frame.
 
         Returns:
-            `prompt_sparse_embeddings` (B, N, dim), `prompt_dense_embeddings` (B, E, E, dim) and
+            `prompt_sparse_embeddings` (B, 2, dim), `prompt_dense_embeddings` (B, E, E, dim) and
             `prompt_dense_positional_embeddings` (1, E, E, dim).
         """
-        points, labels, masks = inputs["points"], inputs["labels"], inputs.get("masks")
+        boxes = inputs["boxes"]
+        corners = keras.ops.reshape(boxes, (-1, 2, 2))  # (B, [top-left, bottom-right], (x, y))
+        sparse = _fourier_features((corners + 0.5) / self.input_image_size, self.gaussian_matrix) + self.corner_embeds
 
-        # Points: positional encoding of the pixel centre, plus a foreground or background embedding. Padding points
-        # are replaced outright by the not-a-point embedding.
-        sparse = _fourier_features((points + 0.5) / self.input_image_size, self.gaussian_matrix)
-        labels = keras.ops.expand_dims(labels, -1)
-        sparse = keras.ops.where(labels == 0, sparse + self.background_embed, sparse + self.foreground_embed)
-        sparse = keras.ops.where(labels == -1, self.not_a_point_embed, sparse)
-
-        # Mask: downscaled to the embedding grid, or a learned "no mask" embedding everywhere.
-        if masks is None:
-            grid = (keras.ops.shape(points)[0], self.embedding_size, self.embedding_size, self.dim)
-            dense = keras.ops.broadcast_to(self.no_mask_embed, grid)
-        else:
-            dense = self.mask_downscaler(masks)
+        grid = (keras.ops.shape(boxes)[0], self.embedding_size, self.embedding_size, self.dim)
+        dense = keras.ops.broadcast_to(self.no_mask_embed, grid)
 
         # Positional encoding of every embedding grid cell's centre, for the mask decoder.
         centres = (keras.ops.arange(self.embedding_size, dtype="float32") + 0.5) / self.embedding_size
@@ -267,7 +219,6 @@ class PromptEncoder(keras.Model):  # pylint: disable=too-many-instance-attribute
             "dim": self.dim,
             "input_image_size": self.input_image_size,
             "embedding_size": self.embedding_size,
-            "mask_in_channels": self.mask_in_channels,
         }
 
 

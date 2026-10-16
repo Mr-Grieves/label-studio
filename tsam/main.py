@@ -31,8 +31,8 @@ from tsam.model import NewModel
 _DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
 # label-studio-ml reads LABEL_STUDIO_* (to fetch task images) and mlflow reads MLFLOW_TRACKING_* (to load the model)
-# straight from the environment. Load them with `eval "$(make -s load_secrets)"`, then start VS Code / the server from
-# that shell.
+# straight from the environment. The VS Code debug config decrypts them into .env before each launch
+# (.vscode/tasks.json); from a shell, `eval "$(make -s -C ../isonoai load_secrets)"` first.
 _REQUIRED_ENV = (
     "LABEL_STUDIO_URL",
     "LABEL_STUDIO_API_KEY",
@@ -53,7 +53,8 @@ def check_env():
     if missing:
         raise SystemExit(
             f"Missing environment variables: {', '.join(missing)}. "
-            'Run `eval "$(make -s load_secrets)"` and launch from that shell.'
+            "The VS Code debug config loads them into .env first (.vscode/tasks.json); from a shell, run "
+            '`eval "$(make -s -C ../isonoai load_secrets)"` first.'
         )
 
 

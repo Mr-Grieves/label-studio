@@ -1,24 +1,21 @@
-"""Label Studio ML backend for effsam: isonoai's click-prompted SAM.
+"""Label Studio ML backend for effsam: isonoai's box-prompted SAM.
 
-Runs the Keras SAM logged to MLflow by an isonoai training run (see main.py), split
-the way isonoai's interactive mode uses it:
-    sam.image_encoder  images (B, 256, 256, 1) -> embeddings
-    sam.decode         embeddings + clicks + previous mask -> mask logits and IoU
+Runs the box-only Keras SAM logged to MLflow by an isonoai training run (see main.py), in two steps:
+    sam.image_encoder                    prescan image (B, 256, 256, 1) -> embeddings
+    sam.prompt_encoder, sam.mask_decoder  embeddings + box -> mask logits and IoU
 
-Interaction: KeyPointLabels clicks in, a BrushLabels mask out. Regular clicks are
-foreground, alt-clicks (is_positive=False) are background. Box prompts are
-ignored -- the model was trained on clicks only.
+Interaction: a smart RectangleLabels box in, a BrushLabels mask out (with the box's label, so the two
+tags need the same label values). Each box gives one prediction: the model takes no clicks and no
+previous mask. Keypoint clicks are ignored.
 
-Per click, Label Studio re-sends every click made so far. The backend:
-  - embeds each image once and caches the embedding, so a click only runs the
-    (cheap) decoder;
-  - feeds the previous prediction's logits back in as the mask prompt when the
-    new clicks extend the previous ones, as in training ("mask loopback"), and
-    predicts without it otherwise (first click, or a click deleted/moved).
-Both caches are in-process, so run this backend with a single gunicorn worker.
+The backend embeds each image once and caches the embedding, so a new box only runs the (cheap)
+prompt encoder and mask decoder. The cache is in-process, so run this backend with a single
+gunicorn worker.
 
-Preprocessing matches isonoai's training pipeline: grayscale, /255, bilinear
-resize to 256x256. Clicks are given to the model in pixels of that 256 frame.
+Preprocessing matches isonoai's training pipeline: grayscale, /255, bilinear resize to 256x256.
+The box is given to the model as (x0, y0, x1, y1) in pixels of that 256 frame of the prescan image,
+converted from its two post-scan corners -- which assumes a linear probe, where a post-scan
+rectangle is also one in prescan. (On a curvilinear probe its sides would curve.)
 """
 
 import json
@@ -55,9 +52,8 @@ logger = logging.getLogger(__name__)
 
 ALPHA = 127
 LS_WIDTH, LS_HEIGHT = 800, 800
-INPUT_SIZE = 256  # the model's input frame (as trained); clicks are in its pixels
+INPUT_SIZE = 256  # the model's input frame (as trained); boxes are in its pixels
 EMBEDDING_CACHE_SIZE = int(os.getenv("EMBEDDING_CACHE_SIZE", 16))
-LOGITS_CACHE_SIZE = int(os.getenv("LOGITS_CACHE_SIZE", 256))
 SMOOTH_SIGMA = float(os.getenv("SMOOTH_SIGMA", 2.5)) # Gaussian smoothing of the logits, in pixels of the 256 frame; 0 = off
 
 
@@ -84,13 +80,15 @@ class LRUCache:
                 self.items.popitem(last=False)
 
 
-def preprocess_xy(x_percent: float, y_percent: float, timestamp: int, convert_utils: pyconvert.ConvertUtils) -> tuple:
-    """Convert the post-scan clicks to prescan image coordinates."""
-    # Convert to prescan
-    x = x_percent / 100 * LS_WIDTH
-    y = y_percent / 100 * LS_HEIGHT
-    x, y = convert_point_to_prescan(np.array([x, y]), timestamp, LS_WIDTH, LS_HEIGHT, convert_utils)
-    return x, y
+def box_corners(value: dict) -> np.ndarray:
+    """A Label Studio rectangle's top-left and bottom-right corners, as (2, 2) pixels of the post-scan frame.
+
+    Label Studio gives x, y, width and height in percent. Rotation is ignored: on a linear probe the
+    post-scan -> prescan conversion is a scale and shift, so the two corners fix the whole box.
+    """
+    x, y = value["x"] / 100 * LS_WIDTH, value["y"] / 100 * LS_HEIGHT
+    w, h = value["width"] / 100 * LS_WIDTH, value["height"] / 100 * LS_HEIGHT
+    return np.array([[x, y], [x + w, y + h]])
 
 
 def largest_component(mask: np.ndarray) -> np.ndarray:
@@ -102,11 +100,7 @@ def largest_component(mask: np.ndarray) -> np.ndarray:
 
 
 def refine_logits(logits: np.ndarray) -> np.ndarray:
-    """Smooth the (256, 256) logits and keep only the largest connected foreground component.
-
-    Works on the logits rather than a binary mask, so the result can still be looped
-    back as the mask prompt -- the model was trained on its own logits, not 0/1 masks.
-    """
+    """Smooth the (256, 256) logits and keep only the largest connected foreground component."""
     if SMOOTH_SIGMA > 0:
         logits = cv2.GaussianBlur(logits, (0, 0), SMOOTH_SIGMA)
     # Dropped components become background with the same confidence.
@@ -148,15 +142,14 @@ class EffSamHandler:
     Thread-safe: requests run on several threads at once.
     """
 
-    def __init__(self, mlflow_id, embedding_cache_size: int, logits_cache_size: int):
+    def __init__(self, mlflow_id, embedding_cache_size: int):
         self.sam = load_sam(mlflow_id)
         self.embeddings = LRUCache(embedding_cache_size)  # prescan S3 key -> embeddings
-        self.logits = LRUCache(logits_cache_size)  # (task id, image url, clicks) -> that prediction's logits
         # (blob S3 key, timestamp) -> (images JSON string, prescan (w, h))
         self.metadata = LRUCache(embedding_cache_size)
 
         # One converter. It holds one image's metadata at a time (set by
-        # loadImageMetadata), so loading it and converting that image's clicks
+        # loadImageMetadata), so loading it and converting that image's box or mask
         # happen together under converter_lock.
         self.convert_utils = pyconvert.ConvertUtils()
         self.converter_lock = threading.Lock()
@@ -190,20 +183,28 @@ class EffSamHandler:
             self.metadata.put(key, cached)
         return (key, *cached)
 
-    def convert_clicks_to_prescan(self, clicks_percent: list, blob_key: str, timestamp: int) -> list:
-        """Label Studio's post-scan clicks (percent) -> (x, y) pixels of the model's 256 frame,
-        via the image's pre-scan coordinates."""
+    def convert_box_to_prescan(self, corners: np.ndarray, blob_key: str, timestamp: int) -> np.ndarray | None:
+        """A box's post-scan corners (box_corners) -> the box in the model's 256 frame, as (x0, y0, x1, y1)
+        pixels via the image's prescan coordinates; None if a corner doesn't convert. Linear probes only."""
         key, images_json, (pre_w, pre_h) = self.load_metadata(blob_key, timestamp)
         with self.converter_lock:
             if self.converter_key != key:
                 self.convert_utils.loadImageMetadata(images_json)
                 self.converter_key = key
-            points = []
-            for x_percent, y_percent in clicks_percent:
-                x, y = preprocess_xy(x_percent, y_percent, timestamp, self.convert_utils)
-                # Normalize to [0, INPUT_SIZE] based on the prescan image size
-                points.append((x / pre_w * INPUT_SIZE, y / pre_h * INPUT_SIZE))
-        return points
+            converted = [
+                convert_point_to_prescan(corner, timestamp, LS_WIDTH, LS_HEIGHT, self.convert_utils)
+                for corner in corners
+            ]
+        if any(p is None or not np.all(np.isfinite(p)) for p in converted):
+            return None
+        # Normalized to the model's frame, and clipped to it as training clips its boxes (isonoai's
+        # mask_box: [0, 255]): a box drawn past the scan area converts to points outside the prescan
+        # image. min/max, since the conversion may flip or swap the axes.
+        points = np.clip(np.array(converted, dtype=np.float32) / [pre_w, pre_h] * INPUT_SIZE, 0, INPUT_SIZE - 1)
+        (x0, y0), (x1, y1) = points.min(axis=0), points.max(axis=0)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return np.array([x0, y0, x1, y1], dtype=np.float32)
 
     def convert_mask_to_postscan(self, logits: np.ndarray, blob_key: str, timestamp: int) -> np.ndarray:
         """(256, 256) logits from the model's frame -> binary mask in the post-scan frame."""
@@ -217,7 +218,7 @@ class EffSamHandler:
 
 
 class NewModel(LabelStudioMLBase):
-    """effsam: isonoai's SAM, prompted with clicks.
+    """effsam: isonoai's box-only SAM, prompted with a box.
 
     label-studio-ml creates a new instance per request, so the handler that should
     outlive a request is a class attribute shared by all instances.
@@ -230,7 +231,7 @@ class NewModel(LabelStudioMLBase):
     @classmethod
     def configure(cls, mlflow_id: str) -> None:
         """Load the model from MLflow run `mlflow_id`; every instance then shares it."""
-        cls.handler = EffSamHandler(mlflow_id, EMBEDDING_CACHE_SIZE, LOGITS_CACHE_SIZE)
+        cls.handler = EffSamHandler(mlflow_id, EMBEDDING_CACHE_SIZE)
         cls.mlflow_id = mlflow_id
 
     def setup(self):
@@ -238,16 +239,18 @@ class NewModel(LabelStudioMLBase):
         self.set("model_version", f"effsam-{self.mlflow_id}")
 
     def predict(self, tasks: list[dict], context: dict | None = None, **kwargs) -> ModelResponse:
-        """Returns the mask for the clicks made so far on this image."""
+        """Returns the mask for the latest box drawn on this image."""
         from_name, to_name, value = self.get_first_tag_occurence("BrushLabels", "Image")
         if not context or not context.get("result"):
             logger.warning("No context! -- cannot make a prediction.")
             return ModelResponse(predictions=[])  # no interaction yet
 
-        kps = [ctx for ctx in context["result"] if ctx["type"] == "keypointlabels"]
-        if not kps:
-            logger.info("effsam only uses click prompts -- Box inputs not supported.")
+        # Label Studio sends every smart box with the drawn one's label; the latest is the one just drawn.
+        boxes = [ctx for ctx in context["result"] if ctx["type"] == "rectanglelabels"]
+        if not boxes:
+            logger.info("effsam's box-only model needs a box prompt -- clicks aren't supported.")
             return ModelResponse(predictions=[])
+        box = boxes[-1]
 
         # The task holds an s3:// URL to {prefix}/postscan-image_{inst}_{exam}_{image uuid}_{timestamp}.jpg; the
         # prescan image and the image's blob JSON sit beside it.
@@ -264,25 +267,20 @@ class NewModel(LabelStudioMLBase):
         # Compute embeddings for the image using the handler.
         embeddings = self.handler.embed(prescan_key)
 
-        # Clicks in Label Studio's percent coordinates -> pixels of the model's 256 frame.
-        pts = self.handler.convert_clicks_to_prescan(
-            [(ctx["value"]["x"], ctx["value"]["y"]) for ctx in kps], blob_key, ts
-        )
-        clicks = [(x, y, 1.0 if ctx.get("is_positive", True) else 0.0) for (x, y), ctx in zip(pts, kps)]
-        label = kps[-1]["value"]["keypointlabels"][0]
+        # The box in Label Studio's percent coordinates -> (x0, y0, x1, y1) pixels of the model's 256 frame.
+        model_box = self.handler.convert_box_to_prescan(box_corners(box["value"]), blob_key, ts)
+        if model_box is None:
+            logger.warning(f"The box doesn't map onto the scan area of {filename}; no prediction.")
+            return ModelResponse(predictions=[])
+        label = box["value"]["rectanglelabels"][0]
 
-        # Mask loopback: reuse the previous prediction if these clicks extend its clicks by one.
-        clicks = tuple(clicks)
-        previous = self.handler.logits.get((task.get("id"), image_url, clicks[:-1])) if len(clicks) > 1 else None
-        raw_logits, iou = self.handler.sam.decode(
-            embeddings,
-            tf.constant([[c[:2] for c in clicks]], dtype=tf.float32),  # (1, N, 2)
-            tf.constant([[c[2] for c in clicks]], dtype=tf.float32),  # (1, N)
-            previous,  # (1, 4E, 4E) logits, or None for no mask prompt
-        )
-        # Smooth and keep the largest component; these refined logits are both shown and looped back.
-        logits = refine_logits(np.asarray(raw_logits)[0].astype(np.float32))
-        self.handler.logits.put((task.get("id"), image_url, clicks), tf.constant(logits[None]))
+        # The box-only SAM's decoding half, as SAM's own forward pass runs it (sam.py).
+        sam = self.handler.sam
+        prompts = sam.prompt_encoder({"boxes": tf.constant(model_box[None])})
+        outputs = sam.mask_decoder({"image_embeddings": embeddings, **prompts})
+        iou = np.asarray(outputs["iou"])[:, 0]
+        # Smooth and keep the largest component.
+        logits = refine_logits(np.asarray(outputs["mask"])[0, 0].astype(np.float32))
 
         # Low-res logits -> mask in Label Studio's post-scan frame.
         postscan_mask = self.handler.convert_mask_to_postscan(logits, blob_key, ts)
