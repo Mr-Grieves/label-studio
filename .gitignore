@@ -14,6 +14,9 @@ backends/*/data/
 backends/medsam/checkpoints/*.pth
 backends/effsam/savedmodel/
 backends/effsam/.venv/
+backends/medsam2/.venv/
+# MedSAM2's source, cloned for an editable install (see backends/medsam2/Dockerfile)
+backends/medsam2/MedSAM2/
 
 # MedSAM -> Keras conversion: downloaded PyTorch checkpoint and converted preset
 medsam_keras/checkpoints/

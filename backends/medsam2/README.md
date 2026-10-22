@@ -1,0 +1,84 @@
+# medsam2: propagate a hand-labelled mask through a cine
+
+Label one frame of a cine by hand, and [MedSAM2](https://github.com/bowang-lab/MedSAM2) (SAM2.1-tiny
+fine-tuned on medical images, used out of the box) propagates it to every other frame. Corrective
+clicks on any frame steer it.
+
+## Project setup
+
+Label Studio's `<Video>` tag only does boxes, so a cine is a **list of frame images**, one per page:
+each task's `images` holds the frames' URLs. For example:
+
+```xml
+<View>
+  <Image name="image" valueList="$images" zoom="true"/>
+
+  <!-- Hand labels: polygons (or a <BrushLabels>) -->
+  <PolygonLabels name="polygon-labels" toName="image">
+    <Label value="Effusion [Polygon]"/>
+  </PolygonLabels>
+
+  <!-- Clicks that run MedSAM2 -->
+  <KeyPointLabels name="clicks" toName="image" smart="true" smartOnly="true">
+    <Label value="Effusion [SAM]"/>
+  </KeyPointLabels>
+
+  <!-- Only there so Label Studio can show MedSAM2's masks -->
+  <View style="display:none">
+    <BrushLabels name="brush-labels" toName="image">
+      <Label value="Effusion [SAM]"/>
+    </BrushLabels>
+  </View>
+</View>
+```
+
+- The click labels and the hidden brush labels need **the same values**: masks get the click's label.
+- A click's label matches the hand labels with the same name, ignoring a bracketed suffix
+  (`Effusion [SAM]` uses the `Effusion [Polygon]` hand labels).
+
+## Labelling a cine
+
+1. On the center frame (or any frame), label the object by hand, as a polygon or mask.
+2. **Submit or update the annotation.** Label Studio only sends the backend its smart regions, so the
+   backend reads the hand labels from the saved annotation: the task's most recently updated one.
+3. Turn on Auto-Annotation and click with the smart keypoint tool:
+   - on the hand-labelled frame: propagates the hand label through the cine;
+   - on another frame: a corrective click there (alt-click for background), then propagates again
+     with it.
+4. Accept the prediction: a mask on every frame that isn't hand-labelled.
+
+Several hand-labelled frames all serve as prompts. Hand labels are regions you drew, or accepted
+predictions you then edited; untouched accepted predictions don't count, so accepting the propagated
+masks doesn't turn them into prompts.
+
+A background click on its own, far from the object, makes SAM2 drop the object on that frame:
+correct with a foreground click, or a background click on the leak itself.
+
+## Running it
+
+Locally (Apple Silicon runs it on the GPU via MPS): create the venv once,
+
+```bash
+cd backends/medsam2
+```
+```bash
+python3.12 -m venv .venv && .venv/bin/pip install torch torchvision -r requirements-base.txt -r requirements.txt
+```
+```bash
+curl -L https://codeload.github.com/bowang-lab/MedSAM2/tar.gz/332f30d420f1d1b08e2a79b3ae6a602458808383 | tar xz && mv MedSAM2-332f30d420f1d1b08e2a79b3ae6a602458808383 MedSAM2
+```
+```bash
+SAM2_BUILD_CUDA=0 .venv/bin/pip install --no-build-isolation -e ./MedSAM2
+```
+
+then start **MedSAM2 backend (debug)** in VS Code (port 9095). In Docker on the GPU server:
+`docker compose up -d medsam2-backend` (port 9094).
+
+The checkpoint is downloaded from Hugging Face on the first request. Settings (environment):
+
+| Variable | Default | |
+|---|---|---|
+| `MEDSAM2_CHECKPOINT` | `MedSAM2_US_Heart.pt` | from `wanglab/MedSAM2`; `MedSAM2_latest.pt` is the general model |
+| `DEVICE` | CUDA, else MPS, else CPU | |
+| `KEEP_LARGEST` | `true` | keep each frame's largest piece |
+| `STATE_CACHE_SIZE` | `2` | cines kept loaded on the device |

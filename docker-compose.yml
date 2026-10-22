@@ -164,6 +164,36 @@ services:
       - "./backends/effsam/savedmodel:/models:ro"
       - "./images:/label-studio/images:ro"
 
+  medsam2-backend:
+    container_name: ml-backend-medsam2
+    build:
+      context: ./backends/medsam2
+    depends_on:
+      - label-studio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+    environment:
+      - LOG_LEVEL=INFO
+      # One worker: the model and the loaded cines live in the process.
+      - WORKERS=1
+      - THREADS=4
+      # From huggingface.co/wanglab/MedSAM2; MedSAM2_latest.pt is the general model
+      - MEDSAM2_CHECKPOINT=MedSAM2_US_Heart.pt
+      - LABEL_STUDIO_URL=http://label-studio:8080
+      - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+      - LOCAL_FILES_DOCUMENT_ROOT=/label-studio/images
+    ports:
+      - "9094:9090"
+    volumes:
+      # The downloaded checkpoint (HF_HOME), kept across rebuilds
+      - "./backends/medsam2/data:/data"
+      - "./images:/label-studio/images:ro"
+
 secrets:
   PRIVATE_REPO_GH_TOKEN:
     environment: PRIVATE_REPO_GH_TOKEN

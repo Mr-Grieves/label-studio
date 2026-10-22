@@ -1,0 +1,4 @@
+# MedSAM2 itself is installed from GitHub separately (see Dockerfile / README): its build needs
+# torch already installed.
+huggingface_hub
+opencv-python-headless<4.13  # label-studio-sdk caps it
