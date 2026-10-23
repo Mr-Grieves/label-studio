@@ -1,7 +1,7 @@
 .PHONY: help install secrets run docker-build docker-run
 
 # The isonoai training run whose SAM to serve; override with `make run MLFLOW_ID=<run id>`
-MLFLOW_ID ?= fb98dac80d9340689e39421c433dc4bb
+MLFLOW_ID ?= 4b3db0d33d134904a37892a222bb6951
 # The host port the backend listens on (Label Studio, or a tunnel, points here)
 PORT ?= 9094
 IMAGE ?= tsam-backend
@@ -9,6 +9,9 @@ IMAGE ?= tsam-backend
 ISONOAI ?= ../isonoai
 # The secrets files the backend needs (see tsam/main.py's check_env)
 SECRETS := aws label_studio mlflow
+# Your age key for sops, unless your shell already sets it: on macOS sops otherwise only looks in
+# ~/Library/Application Support/sops/age/
+export SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sops/age/keys.txt
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-14s %s\n", $$1, $$2}'
