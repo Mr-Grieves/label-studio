@@ -9,7 +9,7 @@ WORKDIR /app
 # - python3.12 + venv
 # - git: label-studio-ml and the private-repo Poetry plugin come from GitHub
 # - pyconvert's shared libraries (GL, fonts, D-Bus, X11, ICU, GLib), and xvfb:
-#   it needs a display, so the app runs under xvfb-run (see start.sh). Same set
+#   it needs a display, so the app runs under xvfb-run (see tsam/start.sh). Same set
 #   as isonoai's image.
 RUN --mount=type=cache,target="/var/cache/apt",sharing=locked \
     --mount=type=cache,target="/var/lib/apt/lists",sharing=locked \
@@ -21,7 +21,7 @@ RUN --mount=type=cache,target="/var/cache/apt",sharing=locked \
         libdbus-1-3 libx11-6 libicu74 libglib2.0-0t64
 
 # Poetry in its own venv; the app's venv is /app/.venv (poetry.toml: in-project).
-# WORKERS=1: the embedding and mask caches in model.py are per process.
+# WORKERS=1: the embedding cache in tsam/model.py is per process.
 RUN python3.12 -m venv /opt/poetry && /opt/poetry/bin/pip install --no-cache-dir "poetry==${POETRY_VERSION}"
 ENV PATH=/app/.venv/bin:/opt/poetry/bin:$PATH \
     PYTHONUNBUFFERED=1 \
@@ -33,7 +33,7 @@ ENV PATH=/app/.venv/bin:/opt/poetry/bin:$PATH \
     QT_QPA_PLATFORM=offscreen
 
 # Dependencies, as in isonoai's image: a GitHub token (build secret
-# PRIVATE_REPO_GH_TOKEN, see docker-compose.yml) gives the private-repo plugin
+# PRIVATE_REPO_GH_TOKEN, see the Makefile's docker-build) gives the private-repo plugin
 # access to pyconvert; it's removed again before the layer is committed.
 COPY pyproject.toml poetry.lock poetry.toml ./
 RUN --mount=type=secret,id=PRIVATE_REPO_GH_TOKEN \
@@ -47,8 +47,7 @@ RUN --mount=type=secret,id=PRIVATE_REPO_GH_TOKEN \
 
 COPY . ./
 
-# NOTE: the model is NOT baked into the image. The two SavedModels from
-# export_savedmodel.py are mounted at runtime from ./savedmodel (see
-# docker-compose.yml), so swapping models doesn't need a rebuild.
+# NOTE: the model is NOT baked into the image. The backend downloads it from
+# MLflow run $MLFLOW_ID at startup, so a new model doesn't need a rebuild.
 
-CMD ["./start.sh"]
+CMD ["./tsam/start.sh"]

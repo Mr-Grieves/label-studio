@@ -1,21 +1,12 @@
-# Exclude everything
+# Exclude everything, then include only what the image needs. Secrets (.env) stay out: they're
+# passed to `docker run` instead (see the Makefile).
 **
 
-# Include Dockerfile and docker-compose for reference
-!Dockerfile
-!docker-compose.yml
-
-# Include Python application files
-!*.py
-# ...except the exporter, which runs in the isonoai environment, not here
-export_savedmodel.py
-
-# Include the Poetry project files
+# The Poetry project files
 !pyproject.toml
 !poetry.lock
 !poetry.toml
 
-# Include script
-!*.sh
-
-# The SavedModels are intentionally excluded -- mounted at runtime from ./savedmodel
+# The backend
+!tsam/**/*.py
+!tsam/start.sh
