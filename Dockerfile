@@ -39,7 +39,8 @@ COPY pyproject.toml poetry.lock poetry.toml ./
 RUN --mount=type=secret,id=PRIVATE_REPO_GH_TOKEN \
     --mount=type=cache,target=/root/.cache/pypoetry,sharing=locked \
     poetry config pypi-token.pyisonosw "$(cat /run/secrets/PRIVATE_REPO_GH_TOKEN)" && \
-    git clone --depth 1 "https://$(cat /run/secrets/PRIVATE_REPO_GH_TOKEN)@github.com/clariusmhealth/pypi-private-repo" /tmp/pypi-private-repo && \
+    git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$(cat /run/secrets/PRIVATE_REPO_GH_TOKEN)" | base64 | tr -d '\n')" \
+        clone --depth 1 https://github.com/clariusmhealth/pypi-private-repo /tmp/pypi-private-repo && \
     poetry self add /tmp/pypi-private-repo && \
     poetry install --no-interaction --no-root && \
     rm -rf /tmp/pypi-private-repo && \
