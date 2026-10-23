@@ -48,7 +48,9 @@ docker-build: ## Build the Docker image (needs $PRIVATE_REPO_GH_TOKEN, as for is
 
 # The image's gunicorn reads basic auth from BASIC_AUTH_*; passed by name from your ML_SERVER_BASIC_AUTH_*
 # (what `make run` uses), so the values never appear on the command line.
+# --init: a minimal init as PID 1. xvfb-run (tsam/start.sh) hangs as PID 1, waiting for a signal from
+# Xvfb that it never gets.
 docker-run: .env ## Run the Docker image on PORT, serving MLflow run MLFLOW_ID
 	BASIC_AUTH_USER="$$ML_SERVER_BASIC_AUTH_USER" BASIC_AUTH_PASS="$$ML_SERVER_BASIC_AUTH_PASS" \
-		docker run --rm -p $(PORT):9090 --env-file .env -e MLFLOW_ID=$(MLFLOW_ID) \
+		docker run --init --rm -p $(PORT):9090 --env-file .env -e MLFLOW_ID=$(MLFLOW_ID) \
 		-e BASIC_AUTH_USER -e BASIC_AUTH_PASS -e SMOOTH_SIGMA -e EMBEDDING_CACHE_SIZE -e LOG_LEVEL $(IMAGE)
