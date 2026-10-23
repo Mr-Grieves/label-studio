@@ -38,18 +38,32 @@ each task's `images` holds the frames' URLs. For example:
 
 ## Labelling a cine
 
+Use **auto-accept**, with the `plugins/replace-propagated.js` plugin in the project. Without
+auto-accept, Label Studio draws every pending mask of a frame list on whichever frame you're on
+(its pending predictions aren't filtered by frame), which is unreadable and slow for a cine.
+
 1. On the center frame (or any frame), label the object by hand, as a polygon or mask.
 2. **Submit or update the annotation.** Label Studio only sends the backend its smart regions, so the
    backend reads the hand labels from the saved annotation: the task's most recently updated one.
-3. Turn on Auto-Annotation and click with the smart keypoint tool:
-   - on the hand-labelled frame: propagates the hand label through the cine;
+3. Turn on Auto-Annotation and auto-accept, and click with the smart keypoint tool:
+   - on the hand-labelled frame: propagates the hand label through the cine, from scratch;
    - on another frame: a corrective click there (alt-click for background), then propagates again
-     with it.
-4. Accept the prediction: a mask on every frame that isn't hand-labelled.
+     with it and every correction since.
+4. Each run is accepted as a mask on every frame that isn't hand-labelled; the plugin deletes the
+   previous run's masks, so each frame keeps the newest.
 
-Several hand-labelled frames all serve as prompts. Hand labels are regions you drew, or accepted
-predictions you then edited; untouched accepted predictions don't count, so accepting the propagated
-masks doesn't turn them into prompts.
+Auto-accept deletes the clicks after each run, so the backend remembers your corrections for each
+task and label (its log lists them). They're dropped when you click a hand-labelled frame, or when
+the saved hand labels change.
+
+Every hand-labelled frame and every corrected frame is a prompt that MedSAM2 keeps in memory for
+all the others (a SAM2 "conditioning frame"), so any number of them work together in one continuous
+pass -- if the masks start to drift, hand-label (or correct) a frame where they do. Hand labels are
+regions you drew, or accepted predictions you then edited; untouched accepted predictions don't
+count, so accepting the propagated masks doesn't turn them into prompts.
+
+A click on a hand-labelled frame only starts propagation: the backend drops it, since in SAM2 clicks
+on a frame replace its mask prompt. To correct a hand-labelled frame, edit the label and save.
 
 A background click on its own, far from the object, makes SAM2 drop the object on that frame:
 correct with a foreground click, or a background click on the leak itself.

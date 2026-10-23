@@ -22,6 +22,7 @@ box on the frames as Label Studio shows them. It's SAM2's video predictor: hand-
 corrective clicks are prompts on their frames, propagated forwards and backwards through the cine.
 """
 
+import json
 import logging
 import os
 import shutil
@@ -51,6 +52,7 @@ CHECKPOINT = os.getenv("MEDSAM2_CHECKPOINT", "MedSAM2_US_Heart.pt")
 MODEL_CONFIG = os.getenv("MEDSAM2_CONFIG", "configs/sam2.1_hiera_t512.yaml")  # inside MedSAM2's sam2 package
 DEVICE = os.getenv("DEVICE") or None  # None: CUDA, else Apple MPS, else CPU
 STATE_CACHE_SIZE = int(os.getenv("STATE_CACHE_SIZE", 2))  # cines kept loaded on the device
+CORRECTIONS_CACHE_SIZE = 256  # (task, label) pairs whose corrective clicks are remembered
 DOWNLOAD_THREADS = int(os.getenv("DOWNLOAD_THREADS", 16))
 KEEP_LARGEST = os.getenv("KEEP_LARGEST", "true").lower() == "true"  # one piece per frame
 HAND_LABEL_ORIGINS = {"manual", "prediction-changed"}  # an accepted prediction you edited counts as yours
@@ -117,10 +119,22 @@ class MedSam2Handler:
 
     def __init__(self):
         checkpoint = hf_hub_download(repo_id="wanglab/MedSAM2", filename=CHECKPOINT)
-        self.predictor = build_sam2_video_predictor(MODEL_CONFIG, checkpoint, device=DEVICE)
+        self.predictor = build_sam2_video_predictor(
+            MODEL_CONFIG,
+            checkpoint,
+            device=DEVICE,
+            # A frame given corrective clicks becomes a conditioning frame, kept in memory for every frame
+            # like a hand label, as MedSAM2 was fine-tuned (sam2.1_hiera_tiny_finetune512.yaml). SAM2's
+            # inference default only keeps it among the last few frames tracked.
+            hydra_overrides_extra=["++model.add_all_frames_to_correct_as_cond=true"],
+        )
         self.device = self.predictor.device
         logger.info(f"MedSAM2 {CHECKPOINT} loaded on {self.device}")
         self.states = LRUCache(STATE_CACHE_SIZE)  # task id -> the cine's inference state
+        # (task id, label) -> (the hand labels' fingerprint, {(frame, x %, y %, positive), ...}): the
+        # corrective clicks so far. Auto-accept deletes the clicks after each prediction, so Label
+        # Studio only ever sends the newest one.
+        self.corrections = LRUCache(CORRECTIONS_CACHE_SIZE)
         self.lock = threading.Lock()
 
     def load_cine(self, task_id: int, frame_paths: list[str]) -> dict:
@@ -153,7 +167,7 @@ class MedSam2Handler:
             self.predictor.reset_state(state)
             for frame, mask in seeds.items():
                 self.predictor.add_new_mask(state, frame_idx=frame, obj_id=OBJ_ID, mask=mask)
-            masks = self._propagate_both_ways(state)
+            masks = self._propagate_both_ways(state, min(seeds))
             if clicks:
                 # Clicks go in after a first propagation: SAM2 refines a frame it has tracked (from its
                 # prediction there and its memory of the hand labels). On an untracked frame it would
@@ -162,14 +176,23 @@ class MedSam2Handler:
                     self.predictor.add_new_points_or_box(
                         state, frame_idx=frame, obj_id=OBJ_ID, points=points, labels=labels
                     )
-                masks = self._propagate_both_ways(state)
+                masks = self._propagate_both_ways(state, min(set(seeds) | set(clicks)))
         return masks
 
-    def _propagate_both_ways(self, state: dict) -> dict:
+    def _propagate_both_ways(self, state: dict, first_prompted: int) -> dict:
+        """One continuous forward pass from the first prompted frame, and a backward pass from it for the
+        frames before it.
+
+        Every prompted frame -- hand-labelled or clicked -- is a conditioning frame, and SAM2 attends to
+        all of them (before and after) on every frame it tracks, so one forward pass already uses every
+        hand label at once. The two passes only meet on the first prompted frame, so masks don't jump
+        where one pass hands over to the other.
+        """
         masks = {}
-        # Forwards from the first prompted frame, then backwards from the last.
         for reverse in (False, True):
-            for frame, _, logits in self.predictor.propagate_in_video(state, reverse=reverse):
+            for frame, _, logits in self.predictor.propagate_in_video(
+                state, start_frame_idx=first_prompted, reverse=reverse
+            ):
                 masks.setdefault(frame, (logits[0, 0] > 0).cpu().numpy())
         return masks
 
@@ -228,20 +251,17 @@ class NewModel(LabelStudioMLBase):
                     frame = result.get("item_index", 0)
                     seeds[frame] = seeds.get(frame, np.zeros((height, width), bool)) | mask
 
-            # Corrective clicks, by frame; a click on a hand-labelled frame only starts propagation.
+            corrections = self.corrections(handler, task["id"], label, hand_labels, clicks, set(seeds))
             prompts = {}
-            for click in clicks:
-                frame = click.get("item_index", 0)
-                if frame in seeds:
-                    continue
+            for frame, x, y, positive in corrections:
                 points, point_labels = prompts.setdefault(frame, ([], []))
-                points.append([click["value"]["x"] / 100 * width, click["value"]["y"] / 100 * height])
-                point_labels.append(1 if click.get("is_positive", True) else 0)
+                points.append([x / 100 * width, y / 100 * height])
+                point_labels.append(1 if positive else 0)
             prompts = {f: (np.array(p, np.float32), np.array(l, np.int32)) for f, (p, l) in prompts.items()}
 
             logger.info(
                 f"Propagating {base_label(label)!r} through {len(urls)} frames from hand labels on "
-                f"frames {sorted(seeds)} and clicks on frames {sorted(prompts)}"
+                f"frames {sorted(seeds)} and corrective clicks on frames {sorted(prompts)}"
             )
             masks = handler.propagate(state, seeds, prompts)
 
@@ -266,6 +286,35 @@ class NewModel(LabelStudioMLBase):
                 "readonly": False,
             })
         return ModelResponse(predictions=[{"result": results, "model_version": self.get("model_version")}])
+
+    @staticmethod
+    def corrections(
+        handler: MedSam2Handler, task_id: int, label: str, hand_labels: list[dict], clicks: list[dict], seeds: set
+    ) -> list[tuple]:
+        """The corrective clicks to use, as (frame, x %, y %, positive): the ones remembered for this
+        task and label, plus this request's. Call under handler.lock.
+
+        With auto-accept, Label Studio deletes the smart clicks after each prediction, so a request
+        carries only the newest click; earlier corrections are remembered here instead. Without it,
+        every click is sent each time, and the duplicates collapse.
+
+        Starting again: if the newest click is on a hand-labelled frame, or the saved hand labels have
+        changed, the remembered corrections are dropped. Clicks on hand-labelled frames are never
+        corrections -- in SAM2 they'd replace the frame's hand-labelled mask.
+        """
+        fingerprint = "\n".join(sorted(json.dumps([r.get("item_index"), r["value"]], sort_keys=True) for r in hand_labels))
+        key = (task_id, base_label(label))
+        remembered = handler.corrections.get(key)
+        if remembered is None or remembered[0] != fingerprint or clicks[-1].get("item_index", 0) in seeds:
+            remembered = (fingerprint, {})
+        corrections = dict(remembered[1])  # an insertion-ordered set
+        for click in clicks:
+            frame = click.get("item_index", 0)
+            if frame not in seeds:
+                v = click["value"]
+                corrections[(frame, round(v["x"], 3), round(v["y"], 3), click.get("is_positive", True))] = None
+        handler.corrections.put(key, (fingerprint, corrections))
+        return list(corrections)
 
     def hand_labels(self, task_id: int, label: str) -> list[dict]:
         """The saved hand-drawn brush and polygon regions labelled `label` (without suffix), from the
