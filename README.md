@@ -25,8 +25,17 @@ Linear probes only: boxes are converted from post-scan to prescan by their two c
   a fine-grained token that can read `clariusmhealth/pypi-private-repo` (isonoai's
   `docs/dev/contributing.md`).
 
-`make help` lists the targets. Each run decrypts the secrets into `.env` first (`make secrets`);
-`.env` is git- and docker-ignored.
+`make help` lists the targets. The secrets go in `.env` (git- and docker-ignored): `make run` and
+`make docker-run` decrypt it with `make secrets` if it's missing, and otherwise use it as it is, so
+run `make secrets` again when isonoai's secrets change.
+
+**On a machine that can't decrypt isonoai's secrets** (a server whose sops key isn't one of
+isonoai's), copy `.env` from a machine that can, instead of decrypting:
+
+```bash
+make secrets                                   # on your machine
+scp .env <server>:<path to this repo>/.env     # then, on the server: chmod 600 .env
+```
 
 ## Run locally
 

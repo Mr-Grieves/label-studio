@@ -9,9 +9,12 @@ IMAGE ?= tsam-backend
 ISONOAI ?= ../isonoai
 # The secrets files the backend needs (see tsam/main.py's check_env)
 SECRETS := aws label_studio mlflow
-# Your age key for sops, unless your shell already sets it: on macOS sops otherwise only looks in
-# ~/Library/Application Support/sops/age/
+# On macOS, point sops at ~/.config/sops/age/keys.txt (where isonoai's onboarding puts the key) unless
+# your shell already sets it: there, sops otherwise only looks in ~/Library/Application Support/sops/age/.
+# Elsewhere sops finds its key as it does for isonoai.
+ifeq ($(shell uname),Darwin)
 export SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sops/age/keys.txt
+endif
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -24,7 +27,13 @@ secrets: ## Decrypt the backend's secrets from isonoai's sops files into .env (g
 		sops -d --output-type dotenv "$(ISONOAI)/secrets/$$f.enc.yaml" >> .env.tmp || { rm -f .env.tmp; exit 1; }; \
 	done && mv .env.tmp .env
 
-run: secrets ## Run the backend locally on PORT, serving MLflow run MLFLOW_ID
+# run and docker-run use .env as it is, and only decrypt it when there's none. So on a machine whose
+# sops key can't decrypt isonoai's secrets (e.g. a server), copy in a .env made with `make secrets`
+# elsewhere; refresh it with `make secrets` when the secrets change.
+.env:
+	@$(MAKE) --no-print-directory secrets
+
+run: .env ## Run the backend locally on PORT, serving MLflow run MLFLOW_ID
 	.venv/bin/dotenv -f .env run -- .venv/bin/python -m tsam.main --port $(PORT) --mlflow-id $(MLFLOW_ID)
 
 # As isonoai's `make build`: $PRIVATE_REPO_GH_TOKEN, the token that can read the private pyconvert repo
@@ -39,7 +48,7 @@ docker-build: ## Build the Docker image (needs $PRIVATE_REPO_GH_TOKEN, as for is
 
 # The image's gunicorn reads basic auth from BASIC_AUTH_*; passed by name from your ML_SERVER_BASIC_AUTH_*
 # (what `make run` uses), so the values never appear on the command line.
-docker-run: secrets ## Run the Docker image on PORT, serving MLflow run MLFLOW_ID
+docker-run: .env ## Run the Docker image on PORT, serving MLflow run MLFLOW_ID
 	BASIC_AUTH_USER="$$ML_SERVER_BASIC_AUTH_USER" BASIC_AUTH_PASS="$$ML_SERVER_BASIC_AUTH_PASS" \
 		docker run --rm -p $(PORT):9090 --env-file .env -e MLFLOW_ID=$(MLFLOW_ID) \
 		-e BASIC_AUTH_USER -e BASIC_AUTH_PASS -e SMOOTH_SIGMA -e EMBEDDING_CACHE_SIZE -e LOG_LEVEL $(IMAGE)
