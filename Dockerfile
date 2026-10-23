@@ -38,6 +38,7 @@ ENV PATH=/app/.venv/bin:/opt/poetry/bin:$PATH \
 COPY pyproject.toml poetry.lock poetry.toml ./
 RUN --mount=type=secret,id=PRIVATE_REPO_GH_TOKEN \
     --mount=type=cache,target=/root/.cache/pypoetry,sharing=locked \
+    { test -s /run/secrets/PRIVATE_REPO_GH_TOKEN || { echo "The PRIVATE_REPO_GH_TOKEN build secret is empty" >&2; exit 1; }; } && \
     poetry config pypi-token.pyisonosw "$(cat /run/secrets/PRIVATE_REPO_GH_TOKEN)" && \
     git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$(cat /run/secrets/PRIVATE_REPO_GH_TOKEN)" | base64 | tr -d '\n')" \
         clone --depth 1 https://github.com/clariusmhealth/pypi-private-repo /tmp/pypi-private-repo && \

@@ -24,9 +24,15 @@ secrets: ## Decrypt the backend's secrets from isonoai's sops files into .env (g
 run: secrets ## Run the backend locally on PORT, serving MLflow run MLFLOW_ID
 	.venv/bin/dotenv -f .env run -- .venv/bin/python -m tsam.main --port $(PORT) --mlflow-id $(MLFLOW_ID)
 
-docker-build: ## Build the Docker image (needs `gh auth login` with access to the private pyconvert repo)
-	PRIVATE_REPO_GH_TOKEN="$$(gh auth token)" docker build \
-		--secret id=PRIVATE_REPO_GH_TOKEN,env=PRIVATE_REPO_GH_TOKEN -t $(IMAGE) .
+# As isonoai's `make build`: $PRIVATE_REPO_GH_TOKEN, the token that can read the private pyconvert repo
+# (isonoai's docs/dev/contributing.md), passed as a build secret, so it's never in the image or its history.
+docker-build: ## Build the Docker image (needs $PRIVATE_REPO_GH_TOKEN, as for isonoai's image)
+	@if [ -z "$$PRIVATE_REPO_GH_TOKEN" ]; then \
+		echo "Error: PRIVATE_REPO_GH_TOKEN is not set (see isonoai's docs/dev/contributing.md)."; \
+		exit 1; \
+	fi
+	@echo "$$PRIVATE_REPO_GH_TOKEN" | DOCKER_BUILDKIT=1 docker build \
+		--secret id=PRIVATE_REPO_GH_TOKEN,src=/dev/stdin -t $(IMAGE) .
 
 # The image's gunicorn reads basic auth from BASIC_AUTH_*; passed by name from your ML_SERVER_BASIC_AUTH_*
 # (what `make run` uses), so the values never appear on the command line.

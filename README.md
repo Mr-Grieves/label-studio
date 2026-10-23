@@ -21,7 +21,9 @@ Linear probes only: boxes are converted from post-scan to prescan by their two c
   ```
 - **isonoai checked out at `../isonoai`**, and **sops** able to decrypt its secrets (you can run
   isonoai's `make load_secrets`). The backend's secrets (AWS, Label Studio, MLflow) come from there.
-- **For Docker:** Docker, and `gh auth login` with access to `clariusmhealth/pypi-private-repo`.
+- **For Docker:** Docker, and `PRIVATE_REPO_GH_TOKEN` exported: the same token as for isonoai's image,
+  a fine-grained token that can read `clariusmhealth/pypi-private-repo` (isonoai's
+  `docs/dev/contributing.md`).
 
 `make help` lists the targets. Each run decrypts the secrets into `.env` first (`make secrets`);
 `.env` is git- and docker-ignored.
