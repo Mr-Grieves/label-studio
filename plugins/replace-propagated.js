@@ -1,13 +1,16 @@
 /**
- * medsam2: when newly propagated masks are accepted, delete the older propagated masks they replace.
+ * medsam2: when newly propagated masks are accepted, delete the previous run's masks.
  *
  * With auto-accept on, every MedSAM2 run (each corrective click) is accepted straight away as a
  * fresh set of masks, one per frame. Without this, each frame would collect one mask per run. When
- * new masks are accepted, this deletes, on the same frames and with the same label, the propagated
- * masks from earlier runs: ones accepted earlier in this session, and ones loaded from a saved
- * annotation that came from a prediction and were never edited.
+ * a new run is accepted, this deletes every other mask with the same label: the backend returns its
+ * masks with the click's label on a hidden <BrushLabels>, which nobody draws with, so every mask
+ * with that label is a propagated one. The whole previous run goes, not just the frames the new run
+ * covers, so frames it left empty (the structure gone) don't keep an old mask.
  *
- * Never touched: hand-drawn regions, polygons, edited predictions, other labels, other frames.
+ * (Label Studio saves accepted predictions with origin "manual", so origin can't tell them apart.)
+ *
+ * Never touched: polygons, masks with other labels (including your own hand-drawn brush labels).
  *
  * Label Studio emits no event when a prediction is accepted, so the masks are polled.
  */
@@ -32,19 +35,9 @@
     const fresh = masks.filter((r) => r.fromSuggestion && !accepted.has(r.id));
     if (!fresh.length) return;
 
-    // A frame and label, so a mask only replaces its own label's masks on its own frame.
-    const slot = (r) => `${r.labelName}\u0000${r.item_index ?? 0}`;
-    const freshSlots = new Set(fresh.map(slot));
+    const freshLabels = new Set(fresh.map((r) => r.labelName));
     const freshIds = new Set(fresh.map((r) => r.id));
-    const stale = masks
-      .filter(
-        (r) =>
-          !freshIds.has(r.id) &&
-          freshSlots.has(slot(r)) &&
-          r.origin !== "prediction-changed" && // edited: yours now
-          (accepted.has(r.id) || r.origin === "prediction"),
-      )
-      .map((r) => r.id);
+    const stale = masks.filter((r) => !freshIds.has(r.id) && freshLabels.has(r.labelName)).map((r) => r.id);
     for (const r of fresh) accepted.add(r.id);
 
     for (const id of stale) {

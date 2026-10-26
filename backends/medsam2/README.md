@@ -13,9 +13,12 @@ each task's `images` holds the frames' URLs. For example:
 <View>
   <Image name="image" valueList="$images" zoom="true"/>
 
-  <!-- Hand labels: polygons (or a <BrushLabels>) -->
+  <!-- Hand labels: polygons (or a <BrushLabels>). The suffix says where the structure is visible;
+       see "Structures that come and go" -->
   <PolygonLabels name="polygon-labels" toName="image">
-    <Label value="Effusion [Polygon]"/>
+    <Label value="Effusion [First]"/>
+    <Label value="Effusion [Middle]"/>
+    <Label value="Effusion [Last]"/>
   </PolygonLabels>
 
   <!-- Clicks that run MedSAM2 -->
@@ -34,7 +37,7 @@ each task's `images` holds the frames' URLs. For example:
 
 - The click labels and the hidden brush labels need **the same values**: masks get the click's label.
 - A click's label matches the hand labels with the same name, ignoring a bracketed suffix
-  (`Effusion [SAM]` uses the `Effusion [Polygon]` hand labels).
+  (`Effusion [SAM]` uses the `Effusion [First]`, `[Middle]` and `[Last]` hand labels).
 
 ## Labelling a cine
 
@@ -43,30 +46,58 @@ auto-accept, Label Studio draws every pending mask of a frame list on whichever 
 (its pending predictions aren't filtered by frame), which is unreadable and slow for a cine.
 
 1. On the center frame (or any frame), label the object by hand, as a polygon or mask.
-2. **Submit or update the annotation.** Label Studio only sends the backend its smart regions, so the
-   backend reads the hand labels from the saved annotation: the task's most recently updated one.
+2. **Let the draft save** (Label Studio autosaves it a few seconds after a change), or submit. Label
+   Studio only sends the backend its smart regions, so the backend reads the hand labels from the
+   task's most recently updated draft or submitted annotation. Submit once you're happy with the
+   propagated masks.
 3. Turn on Auto-Annotation and auto-accept, and click with the smart keypoint tool:
    - on the hand-labelled frame: propagates the hand label through the cine, from scratch;
    - on another frame: a corrective click there (alt-click for background), then propagates again
      with it and every correction since.
+   Clicking on an accepted mask selects it instead of placing a click: hold **Cmd** (Ctrl on
+   Windows/Linux) to click through it -- Cmd+click for foreground, **Cmd+Alt+click** for background
+   on a leak.
 4. Each run is accepted as a mask on every frame that isn't hand-labelled; the plugin deletes the
    previous run's masks, so each frame keeps the newest.
 
 Auto-accept deletes the clicks after each run, so the backend remembers your corrections for each
 task and label (its log lists them). They're dropped when you click a hand-labelled frame, or when
-the saved hand labels change.
+the saved or drafted hand labels change.
 
 Every hand-labelled frame and every corrected frame is a prompt that MedSAM2 keeps in memory for
 all the others (a SAM2 "conditioning frame"), so any number of them work together in one continuous
 pass -- if the masks start to drift, hand-label (or correct) a frame where they do. Hand labels are
-regions you drew, or accepted predictions you then edited; untouched accepted predictions don't
-count, so accepting the propagated masks doesn't turn them into prompts.
+the regions you drew (polygons, or masks on a visible brush label); the propagated masks, on the
+hidden brush label, never count, so accepting them doesn't turn them into prompts. To fix a frame
+by hand, draw a polygon on it.
 
 A click on a hand-labelled frame only starts propagation: the backend drops it, since in SAM2 clicks
 on a frame replace its mask prompt. To correct a hand-labelled frame, edit the label and save.
 
 A background click on its own, far from the object, makes SAM2 drop the object on that frame:
 correct with a foreground click, or a background click on the leak itself.
+
+## Structures that come and go
+
+In a sweep, a structure can enter and leave the view. The hand labels' suffixes say where it's
+visible:
+
+- `[First]`: hand-label the **first frame it's visible on**, when it appears partway through;
+- `[Last]`: the **last frame it's visible on**, when it disappears partway through;
+- `[Middle]` (or any other suffix): any other hand label -- optional, to steer it.
+
+| Hand labels | Masks on |
+|---|---|
+| only `[Middle]` | the whole cine |
+| `[First]` ... `[Last]` | that range |
+| `[Last]` ... `[First]` (a gap) | the start to `[Last]`, then `[First]` to the end |
+| `[First]` ... `[Middle]` | `[First]` to the end |
+
+Each stretch is propagated on its own, over exactly its frames, from the hand labels in it, so the
+boundary frames are always prompts. Frames outside every stretch get no mask and aren't tracked, and
+clicks there are ignored. If the labels don't fit -- a second `[First]` before any `[Last]`, or a
+`[Middle]` after a `[Last]` with no `[First]` -- the backend makes a guess and logs a warning. The log
+lists the stretches and each hand label's role on every run.
 
 ## Running it
 

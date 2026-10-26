@@ -13,9 +13,16 @@ A task holds a cine as a list of frame images (`images`), shown one frame per pa
 3. The backend returns one prediction: a BrushLabels mask, with the click's label, on every frame
    that isn't hand-labelled.
 
-Hand labels are the saved annotation's brush and polygon regions whose label matches the click's,
-ignoring a bracketed suffix ("Effusion [SAM]" matches "Effusion [Polygon]"), and that were drawn by
-hand: accepted predictions don't count, unless they were edited afterwards.
+Hand labels are the saved annotation's (or draft's) brush and polygon regions whose label matches
+the click's, ignoring a bracketed suffix ("Effusion [SAM]" matches "Effusion [Polygon]"), except the
+backend's own masks: anything on the hidden BrushLabels it returns its masks on.
+
+Where the structure is visible comes from the hand labels' suffixes: "<label> [First]" on the first
+frame it's visible, "<label> [Last]" on the last, "<label> [Middle]" (or any other suffix) anywhere in
+between. They split the cine into stretches (see stretches): only [Middle] labels -> the whole cine;
+[First] ... [Last] -> that range; [Last] ... [First] -> the start to [Last], then [First] to the end.
+Each stretch is propagated on its own, from the hand labels in it; frames outside every stretch get
+no mask and aren't tracked.
 
 MedSAM2 (github.com/bowang-lab/MedSAM2: SAM2.1-tiny fine-tuned on medical images) runs out of the
 box on the frames as Label Studio shows them. It's SAM2's video predictor: hand-labelled masks and
@@ -31,6 +38,7 @@ import threading
 from collections import OrderedDict
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from uuid import uuid4
 
 import cv2
@@ -55,7 +63,6 @@ STATE_CACHE_SIZE = int(os.getenv("STATE_CACHE_SIZE", 2))  # cines kept loaded on
 CORRECTIONS_CACHE_SIZE = 256  # (task, label) pairs whose corrective clicks are remembered
 DOWNLOAD_THREADS = int(os.getenv("DOWNLOAD_THREADS", 16))
 KEEP_LARGEST = os.getenv("KEEP_LARGEST", "true").lower() == "true"  # one piece per frame
-HAND_LABEL_ORIGINS = {"manual", "prediction-changed"}  # an accepted prediction you edited counts as yours
 
 OBJ_ID = 1  # one object per request: the clicked label's
 
@@ -63,6 +70,48 @@ OBJ_ID = 1  # one object per request: the clicked label's
 def base_label(label: str) -> str:
     """A label without its bracketed suffix: "Effusion [SAM]" -> "Effusion"."""
     return label.rsplit(" [", 1)[0] if label.endswith("]") else label
+
+
+FIRST, MIDDLE, LAST = "[First]", "[Middle]", "[Last]"
+
+
+def role(label: str) -> str:
+    """A hand label's role from its suffix: "LV [First]" -> "[First]"; any other suffix -> "[Middle]"."""
+    suffix = label[len(base_label(label)):].strip()
+    return suffix if suffix in (FIRST, LAST) else MIDDLE
+
+
+def stretches(roles: dict, n_frames: int) -> tuple[list[tuple[int, int]], list[str]]:
+    """The stretches of frames where the structure is visible, as (first, last) pairs, from the hand
+    labels' roles ({frame: {"[First]", "[Middle]", "[Last]"}}), plus warnings about inconsistencies.
+
+    Walking through the frames: a stretch starts at a [First] -- or at frame 0 if the first hand label
+    is a [Middle] or [Last] -- and ends at a [Last], or at the end of the cine. So only [Middle] labels
+    give the whole cine; [Last] then [First] gives the start to [Last], then [First] to the end.
+    A [First] inside a stretch is treated as a [Middle]; a [Middle] or [Last] after a stretch has ended
+    starts a new one just after that end.
+    """
+    order = {FIRST: 0, MIDDLE: 1, LAST: 2}  # on one frame: a stretch that starts and ends there
+    events = sorted((f, order[r], r) for f, rs in roles.items() for r in rs)
+    result, warnings = [], []
+    start, last_end = None, -1
+    for i, (frame, _, r) in enumerate(events):
+        if start is None:
+            if r == FIRST:
+                start = frame
+            else:
+                # The stretch began before this label: at the start of the cine, or after the last end
+                start = last_end + 1
+                if i:  # not the first label: the structure came back without a [First]
+                    warnings.append(f"{r} on frame {frame} after the [Last] on frame {last_end}: assuming it reappears on frame {start}")
+        elif r == FIRST:
+            warnings.append(f"[First] on frame {frame} while already visible since frame {start}: treated as [Middle]")
+        if r == LAST:
+            result.append((start, frame))
+            start, last_end = None, frame
+    if start is not None:
+        result.append((start, n_frames - 1))
+    return result, warnings
 
 
 def largest_component(mask: np.ndarray) -> np.ndarray:
@@ -155,11 +204,12 @@ class MedSam2Handler:
             self.states.put(task_id, state)
         return state
 
-    def propagate(self, state: dict, seeds: dict, clicks: dict) -> dict:
-        """Masks for every frame: {frame: (H, W) bool mask}.
+    def propagate(self, state: dict, seeds: dict, clicks: dict, track: tuple = (None, None)) -> dict:
+        """Masks for the tracked frames: {frame: (H, W) bool mask}.
 
         seeds: {frame: (H, W) bool mask}, the hand labels; clicks: {frame: (points (N, 2) in pixels,
-        labels (N,): 1 foreground, 0 background)}.
+        labels (N,): 1 foreground, 0 background)}; track: (first, last) frames to track, None for the
+        start/end of the cine.
         """
         # bfloat16 on CUDA, as MedSAM2's own inference scripts run; full precision elsewhere.
         autocast = torch.autocast("cuda", dtype=torch.bfloat16) if self.device.type == "cuda" else nullcontext()
@@ -167,7 +217,7 @@ class MedSam2Handler:
             self.predictor.reset_state(state)
             for frame, mask in seeds.items():
                 self.predictor.add_new_mask(state, frame_idx=frame, obj_id=OBJ_ID, mask=mask)
-            masks = self._propagate_both_ways(state, min(seeds))
+            masks = self._propagate_both_ways(state, min(seeds), *track)
             if clicks:
                 # Clicks go in after a first propagation: SAM2 refines a frame it has tracked (from its
                 # prediction there and its memory of the hand labels). On an untracked frame it would
@@ -176,22 +226,27 @@ class MedSam2Handler:
                     self.predictor.add_new_points_or_box(
                         state, frame_idx=frame, obj_id=OBJ_ID, points=points, labels=labels
                     )
-                masks = self._propagate_both_ways(state, min(set(seeds) | set(clicks)))
+                masks = self._propagate_both_ways(state, min(seeds), *track)
         return masks
 
-    def _propagate_both_ways(self, state: dict, first_prompted: int) -> dict:
-        """One continuous forward pass from the first prompted frame, and a backward pass from it for the
-        frames before it.
+    def _propagate_both_ways(self, state: dict, start: int, first: int | None = None, last: int | None = None) -> dict:
+        """One continuous forward pass from `start` (the first hand-labelled frame), and a backward pass
+        from it for the frames before it.
 
         Every prompted frame -- hand-labelled or clicked -- is a conditioning frame, and SAM2 attends to
         all of them (before and after) on every frame it tracks, so one forward pass already uses every
-        hand label at once. The two passes only meet on the first prompted frame, so masks don't jump
-        where one pass hands over to the other.
+        prompt at once. The two passes only meet on a hand-labelled frame, so masks don't jump where one
+        pass hands over to the other.
         """
         masks = {}
         for reverse in (False, True):
+            # Stop at `last` going forwards and `first` going backwards (None: the end of the cine)
+            end = first if reverse else last
             for frame, _, logits in self.predictor.propagate_in_video(
-                state, start_frame_idx=first_prompted, reverse=reverse
+                state,
+                start_frame_idx=start,
+                max_frame_num_to_track=None if end is None else abs(start - end),
+                reverse=reverse,
             ):
                 masks.setdefault(frame, (logits[0, 0] > 0).cpu().numpy())
         return masks
@@ -229,12 +284,14 @@ class NewModel(LabelStudioMLBase):
             return ModelResponse(predictions=[])
         label = clicks[-1]["value"]["keypointlabels"][0]
 
-        # The hand labels, from the saved annotation (Label Studio sends only the smart clicks).
-        hand_labels = self.hand_labels(task["id"], base_label(label))
+        # The hand labels and presence marks, from the saved annotation or draft (Label Studio sends
+        # only the smart clicks).
+        saved = self.saved_result(task["id"])
+        hand_labels = self.hand_labels(saved, base_label(label), prediction_tag=from_name)
         if not hand_labels:
             logger.warning(
-                f"Task {task['id']} has no saved hand-labelled mask or polygon for {base_label(label)!r}: "
-                "label a frame and submit or update the annotation first."
+                f"Task {task['id']} has no saved or drafted hand-labelled mask or polygon for {base_label(label)!r}: "
+                "label a frame, and let the draft save (or submit) first."
             )
             return ModelResponse(predictions=[])
 
@@ -244,31 +301,46 @@ class NewModel(LabelStudioMLBase):
             state = handler.load_cine(task["id"], frame_paths)
             width, height = state["video_width"], state["video_height"]
 
-            seeds = {}
+            seeds, roles = {}, {}
             for result in hand_labels:
                 mask = result_to_mask(result, width, height)
                 if mask is not None:
                     frame = result.get("item_index", 0)
                     seeds[frame] = seeds.get(frame, np.zeros((height, width), bool)) | mask
+                    roles.setdefault(frame, set()).update(role(l) for l in result["value"][result["type"]])
+            visible, warnings = stretches(roles, len(urls))
+            for warning in warnings:
+                logger.warning(f"{base_label(label)!r}: {warning}")
+            in_stretch = lambda f: any(a <= f <= b for a, b in visible)
 
             corrections = self.corrections(handler, task["id"], label, hand_labels, clicks, set(seeds))
             prompts = {}
             for frame, x, y, positive in corrections:
+                if not in_stretch(frame):
+                    continue  # outside where the structure is visible
                 points, point_labels = prompts.setdefault(frame, ([], []))
                 points.append([x / 100 * width, y / 100 * height])
                 point_labels.append(1 if positive else 0)
             prompts = {f: (np.array(p, np.float32), np.array(l, np.int32)) for f, (p, l) in prompts.items()}
 
             logger.info(
-                f"Propagating {base_label(label)!r} through {len(urls)} frames from hand labels on "
-                f"frames {sorted(seeds)} and corrective clicks on frames {sorted(prompts)}"
+                f"Propagating {base_label(label)!r} through {len(urls)} frames: visible on "
+                f"{', '.join(f'{a}-{b}' for a, b in visible)}; hand labels on frames "
+                f"{', '.join(f'{f}{sorted(roles[f])}' for f in sorted(roles))}; corrective clicks on frames {sorted(prompts)}"
             )
-            masks = handler.propagate(state, seeds, prompts)
+            # Each stretch is propagated on its own, over exactly its frames, from its own hand labels:
+            # tracking through a gap, SAM2 loses the structure and doesn't pick it up again after, even
+            # with a hand label there (it only takes the object's summary from prompts it has passed).
+            masks = {}
+            for first, last in visible:
+                stretch_seeds = {f: m for f, m in seeds.items() if first <= f <= last}
+                stretch_clicks = {f: c for f, c in prompts.items() if first <= f <= last}
+                masks.update(handler.propagate(state, stretch_seeds, stretch_clicks, (first, last)))
 
         results = []
         for frame, mask in sorted(masks.items()):
-            if frame in seeds:
-                continue  # hand-labelled: left as drawn
+            if frame in seeds or not in_stretch(frame):
+                continue  # hand-labelled: left as drawn; outside the stretches: no mask
             if KEEP_LARGEST:
                 mask = largest_component(mask)
             if not mask.any():
@@ -316,18 +388,38 @@ class NewModel(LabelStudioMLBase):
         handler.corrections.put(key, (fingerprint, corrections))
         return list(corrections)
 
-    def hand_labels(self, task_id: int, label: str) -> list[dict]:
-        """The saved hand-drawn brush and polygon regions labelled `label` (without suffix), from the
-        task's most recently updated annotation."""
+    @staticmethod
+    def saved_result(task_id: int) -> list[dict]:
+        """The result of the task's most recently updated annotation or draft.
+
+        Drafts count, so a cine can be propagated and corrected before the annotation is submitted.
+        Label Studio autosaves the draft as you label; the backend can't tell who's clicking, so with
+        several people on one task it uses whoever saved last.
+        """
         client = LabelStudio(base_url=os.environ["LABEL_STUDIO_URL"], api_key=os.environ["LABEL_STUDIO_API_KEY"])
-        annotations = [a for a in client.annotations.list(id=task_id) if not a.was_cancelled]
-        if not annotations:
+        saved = [(a.updated_at, a.result) for a in client.annotations.list(id=task_id) if not a.was_cancelled]
+        # The SDK has no call for a task's drafts (and the task's own `drafts` field leaves them out),
+        # so they're fetched with its authenticated HTTP client.
+        drafts = client._client_wrapper.httpx_client.request(f"api/tasks/{task_id}/drafts", method="GET")
+        drafts.raise_for_status()
+        saved += [(datetime.fromisoformat(d["updated_at"]), d.get("result")) for d in drafts.json()]
+        if not saved:
             return []
-        latest = max(annotations, key=lambda a: a.updated_at)
+        _, latest = max(saved, key=lambda s: s[0])
+        return latest or []
+
+    @staticmethod
+    def hand_labels(saved: list[dict], label: str, prediction_tag: str) -> list[dict]:
+        """The hand-drawn brush and polygon regions labelled `label` (without suffix) in a saved result.
+
+        Propagated masks are told apart by their tag, `prediction_tag` (the hidden BrushLabels the
+        backend returns its masks on, which nobody draws with), not by their origin: Label Studio saves
+        accepted interactive predictions with origin "manual", like hand-drawn regions.
+        """
         return [
-            r for r in latest.result or []
+            r for r in saved
             if r.get("type") in ("brushlabels", "polygonlabels")
-            and r.get("origin", "manual") in HAND_LABEL_ORIGINS
+            and r.get("from_name") != prediction_tag
             and any(base_label(l) == label for l in r["value"].get(r["type"], []))
         ]
 
