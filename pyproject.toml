@@ -20,7 +20,7 @@ mlflow = "3.15.1"
 boto3 = "^1.43"
 opencv-python-headless = ">=4.12,<4.13"  # label-studio-sdk caps <4.13
 # Clarius's private package, pinned to isonoai's version (see the source below).
-pyconvert = { version = "13.2.0.dev20260818114904+f86fbc6f33", source = "pyisonosw" }
+pyconvert = { version = "13.2.0.dev20261026124343+3da6b38e3d", source = "pyisonosw" }
 
 # Same private index as isonoai: GitHub release assets on
 # clariusmhealth/pypi-private-repo, read through its Poetry plugin. Set up once

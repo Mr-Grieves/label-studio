@@ -4113,32 +4113,31 @@ pyasn1 = ">=0.6.1,<0.7.0"
 
 [[package]]
 name = "pyconvert"
-version = "13.2.0.dev20260818114904+f86fbc6f33"
+version = "13.2.0.dev20261026124343+3da6b38e3d"
 description = "pyconvert bindings"
 optional = false
-python-versions = ">=3.10,<4.0"
+python-versions = ">=3.11,<4.0"
 groups = ["main"]
 files = [
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp310-cp310-macosx_26_0_arm64.whl", hash = "sha256:f22e0437dfd681448429b879c993e47de66cd0d199d148c9940fd5a0d73fce1c"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp310-cp310-manylinux_2_35_aarch64.whl", hash = "sha256:80a5e941870c954f827e361768529736f9f595211d2cd78befb2decd2a863919"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp310-cp310-manylinux_2_35_x86_64.whl", hash = "sha256:e143ac3c364610f23187dd898b183b19be3c160a53d506025d826704b388ab54"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp310-cp310-win_amd64.whl", hash = "sha256:2b99cdeeea4da4f44f6e6cfa0e58799034c0c4568f808ba0dd13037b26c982cf"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp311-cp311-macosx_26_0_arm64.whl", hash = "sha256:82fa2e7483f6fea48ce7487ccf78250492e0dc83e840c302252ea4e9d2d27fc5"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp311-cp311-manylinux_2_35_aarch64.whl", hash = "sha256:e21201ddbdc48c4bcabee0db23d146c0b1466f3d997c6fdd618938c60df9c90f"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp311-cp311-manylinux_2_35_x86_64.whl", hash = "sha256:de3e3e954aedbbb61c29e92a9681cc569f1015ee32142eb9a22b1d2d4fe4a9d3"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp311-cp311-win_amd64.whl", hash = "sha256:ce5a5b1e5e92b01b0fdd144a6297be10b4686d50974b8edd8f8203aa8b38372c"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp312-cp312-macosx_26_0_arm64.whl", hash = "sha256:063291eb4f208040e6809e6c78fa17b8eb3b19d1b472e86926677d734dcd6b23"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:b044101cfe4ff91aa2fa7aab5acfbe03f4f041b2c2ccba87f9912c9c5006ad16"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:5ab535db9943443fc96d9a3a241850edd80497c58b9df1e86186173bd0d8f9a1"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp312-cp312-win_amd64.whl", hash = "sha256:5dc30ac738eafff8de7482fc40aede5d19e5fb150b0ea7d654a7f5f0419412db"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp313-cp313-macosx_26_0_arm64.whl", hash = "sha256:27eb8dd1a6c13c8f7ddf9d2209e78f3353f69c80a95a8f6d6428673dccfd2470"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp313-cp313-manylinux_2_35_aarch64.whl", hash = "sha256:9e3718e9c698aeaaf8c3bddb0323a75eea92ab7ca87526b8566c0f8788fdf203"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp313-cp313-manylinux_2_35_x86_64.whl", hash = "sha256:6582e2c80916f96802734d762772b36802f164654bfd8966d873859436aca641"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp313-cp313-win_amd64.whl", hash = "sha256:05a97d6bbb5ff48910ad49704a986c1ae99a8474144b7097d2aa8893d9a300f4"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp314-cp314-macosx_26_0_arm64.whl", hash = "sha256:a59dff02c561ad460d9ee3cfd8cb178e938b0ff8faf9e88afc745f507bbc6539"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp314-cp314-manylinux_2_35_aarch64.whl", hash = "sha256:ebff8413c4da648d88c9386efad8c5fd0f3c2561eeaf17521284679fc3b8c792"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp314-cp314-manylinux_2_35_x86_64.whl", hash = "sha256:40a20fc1d9c9c6d83f2322d952d591332f11800d944538b100635aa1085f1586"},
-    {file = "pyconvert-13.2.0.dev20260818114904+f86fbc6f33-cp314-cp314-win_amd64.whl", hash = "sha256:1a0918fbe8cda7027b7dc00f1a0c5448e08fd7d75bd8c38aef51e5444aece6e0"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp311-cp311-macosx_27_0_arm64.whl", hash = "sha256:8aa76b08051f05e844eb084dc771c646a24ae407e69e7bc60b8d9ac39d9d3696"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp311-cp311-manylinux_2_35_aarch64.whl", hash = "sha256:27938d05d9186390e08f3e839fe51229078d274feda7ed60c50331e8878476e2"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp311-cp311-manylinux_2_35_x86_64.whl", hash = "sha256:b9cdeb32254ca7212beec57248ab2cab76751bebfc44201fae7f9c6c67654763"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp311-cp311-win_amd64.whl", hash = "sha256:c6c218cf09ef8dfceaeb714118ca29ca765e9cfd32f30a0a6ca6b6e1eded3ca0"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp312-cp312-macosx_27_0_arm64.whl", hash = "sha256:7bf7e3edfabcc41840d927c3f5f9c806b3c7ffce06057084be79203162683d01"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:6c2eeb4b87b6e6abbdea78315b444bd881734ca38e03205aa4c08e46275f0a03"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:f1937af5f10663bdf60f684fda91ac280009a0b61aece5307a26c4e68d270fbb"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp312-cp312-win_amd64.whl", hash = "sha256:1b968d60b124387494ae9f83811bc4f554834a337059d485c0975ff78db8ad62"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp313-cp313-macosx_27_0_arm64.whl", hash = "sha256:bc2fa263a08b5910e593150286ed4a3c32d889fb667b5a0470fe1e6a385b09a3"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp313-cp313-manylinux_2_35_aarch64.whl", hash = "sha256:afcfec663018959b3de48495b27026020da96a512f4158dd3ace30bf35c529ab"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp313-cp313-manylinux_2_35_x86_64.whl", hash = "sha256:13f4c3e7003dc520eb4fc17407c4947fc3950f6e3acca5e368af25a5f20da1fe"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp313-cp313-win_amd64.whl", hash = "sha256:fb3aefbfb7d62c597adc90bda5b15d2ae4e9ebdf43abfe491077f571c829883b"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp314-cp314-macosx_27_0_arm64.whl", hash = "sha256:58976798890e7e2cfdbd93e287b5018d1410711d643a48dfe41f420aa17fcf42"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp314-cp314-manylinux_2_35_aarch64.whl", hash = "sha256:bb10a920a2c6abe78ecccffc4340cdb43e89369d04416b811cd7d0704611d2b1"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp314-cp314-manylinux_2_35_x86_64.whl", hash = "sha256:c92904f1b008e661c3231bad6f4eb643d4439271a7474fd6db7227c8a02c4028"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp314-cp314-win_amd64.whl", hash = "sha256:354583a6d54446209ec629adf215fa24c86f5cf306f00046e15a14c94821e518"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp315-cp315-macosx_27_0_arm64.whl", hash = "sha256:9b904fe7504505424d76fee7cdc3961068d423f47eb425491343c9e212271cd2"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp315-cp315-manylinux_2_35_aarch64.whl", hash = "sha256:71fe928c950d2f61b272d7e0de3520f91f497926cccbd97bf75ccb84e5a6886b"},
+    {file = "pyconvert-13.2.0.dev20261026124343+3da6b38e3d-cp315-cp315-manylinux_2_35_x86_64.whl", hash = "sha256:b3ad287613e2e4f3411ca56777aff4f0057a0d9913a6c1fccbbf1ce576bd7260"},
 ]
 
 [package.dependencies]
@@ -6198,4 +6197,4 @@ type = ["pytest-mypy (>=1.0.1) ; platform_python_implementation != \"PyPy\""]
 [metadata]
 lock-version = "2.1"
 python-versions = "~3.12"
-content-hash = "4b2e3d939631f8725b0e6641c587eb53fcb31dc8f373722329760340e86f625b"
+content-hash = "978b2541aac326ee91494f5ed987f6c476cd86b0a52c53ed276b0fbc2bcbe99b"
