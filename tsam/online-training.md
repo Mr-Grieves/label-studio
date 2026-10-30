@@ -56,7 +56,7 @@ Should use low effort keras augmentation pipeline. Test images are never augment
 
 Each project has a short, fixed list of structures (say 6), each with its own typical shape, but SAM itself takes no notion of what a box contains: the box's label is thrown away. The model is told which structure it is looking for through a learned offset per structure:
 
-- **A table of vectors, one row per structure** (e.g. 6 x 192), created as zeros. The project's structure list comes from its labelling config, mapping labels by name without their tool suffix (`Bone [SAM]`, `Bone [Polygon]` -> `Bone`).
+- **A table of vectors, one row per structure** (e.g. 6 x 192), created as zeros. The project's structure list comes from its labelling config, mapping labels by name without their tool suffix (`Bone [SAM]` -> `Bone`).
 - **Where it applies:** between the prompt encoder and the mask decoder, the box's row is added to the two box-corner embeddings. The saved T-SAM model is untouched: this is a tensor add in the backend's own code.
 - **Starting at zero:** before any training it is exactly the original T-SAM. Each row then learns from its own structure's samples, so the decoder can learn, for example, to go for the bright cortical line in a bone box and the fibrillar band in a tendon box.
 - **Every sample carries its structure:** new and replayed samples alike, so replay trains each sample's own row. Test boxes use their structure too, and per-structure test IoU shows which structures benefit.
@@ -74,7 +74,7 @@ Each project has a short, fixed list of structures (say 6), each with its own ty
 
 1. We read the config
 2. We load the pretrained T-SAM
-3. If `continue_run_id` is set, we resume that run: load its model and checkpoint (structure offsets, replay buffer, step) and continue from there. Otherwise we create a new MLflow run, log parameters, and start with the structure offsets at zero.
+3. If `continue_run_id` is set, we resume that run: load its model and checkpoint (structure offsets, replay buffer, step) and continue from there. Otherwise we create a new MLflow run, log parameters, and start with the structure offsets at zero; then we backfill: the project's latest `backfill_limit` annotations (null: all) are fed through `fit()`, oldest first, as if they had just been submitted.
 4. We run the model on the test set: for a new run this is the original T-SAM's baseline; for a resumed run, a check that the restore worked. Its score is the best accepted score so far.
 5. As labels come in through the API, they are queued; once a batch is ready, we run a training step on it plus a replay sample, then re-test.
 6. If test-performance does not degrade beyond the acceptance threshold compared to the best accepted score so far (not the previous model's, or small drops could add up over many updates), we accept the new model and save a checkpoint of it. Otherwise we roll back to the latest accepted state, optimizer state included.

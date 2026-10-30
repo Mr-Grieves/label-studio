@@ -10,8 +10,8 @@
  *     backend every smart keypoint with the clicked one's label, so leftover clicks would also
  *     prompt the next mask. ("Accept all" deletes them itself; the check mark doesn't.)
  *
- * Needs a <PolygonLabels> on the same image with a label for each <BrushLabels> label: the same
- * value, or the same name suffixed " [Polygon]" ("Effusion [SAM]" -> "Effusion [Polygon]").
+ * Needs a <PolygonLabels> on the same image with a label for each <BrushLabels> label: its name
+ * without the tool suffix ("Effusion [SAM]" -> "Effusion").
  * Without it, or if the polygon would have under MIN_POLYGON_POINTS points, the mask is left as
  * it was -- overlap included -- and the console says why.
  */
@@ -84,17 +84,14 @@
   }
 
   /**
-   * The <PolygonLabels> tag and label value for a mask's label: the same value, or else the same
-   * name with a different bracketed suffix ("Effusion [SAM]" -> "Effusion [Polygon]"), as our
-   * projects name labels by tool. Null if there's none.
+   * The <PolygonLabels> tag and label value for a mask's label: its name without the tool suffix
+   * ("Effusion [SAM]" -> "Effusion"). Null if there's none.
    */
   function polygonLabelFor(annotation, image, label) {
-    const base = label.replace(/\s*\[[^\]]*\]\s*$/, "");
-    const candidates = [label, `${base} [Polygon]`, base];
+    const name = label.replace(/\s*\[[^\]]*\]\s*$/, "");
     for (const tag of annotation.names.values()) {
       if (tag.type !== "polygonlabels" || (tag.toname && tag.toname !== image.name)) continue;
-      const match = candidates.find((value) => tag.findLabel?.(value));
-      if (match) return { control: tag, label: match };
+      if (tag.findLabel?.(name)) return { control: tag, label: name };
     }
     return null;
   }

@@ -26,15 +26,15 @@ with the clicked keypoint's label, so the config needs:
 - `<KeyPointLabels smart="true">` and `<BrushLabels>` with the same label values
   (`Effusion [SAM]`), so Label Studio can show the mask while you click. The brush
   labels sit in a hidden view: they're only there to display predictions.
-- a `<PolygonLabels>` label for each of them: the same value, or the same name
-  suffixed ` [Polygon]` (`Effusion [SAM]` -> `Effusion [Polygon]`).
+- a `<PolygonLabels>` label for each of them: its name without the tool suffix
+  (`Effusion [SAM]` -> `Effusion`).
 
 ```xml
 <KeyPointLabels name="clicks" toName="image" smart="true">
   <Label value="Effusion [SAM]" background="#e5484d"/>
 </KeyPointLabels>
 <PolygonLabels name="polygon-labels" toName="image">
-  <Label value="Effusion [Polygon]" background="#e5484d"/>
+  <Label value="Effusion" background="#e5484d"/>
 </PolygonLabels>
 <View style="display:none">
   <BrushLabels name="brush-labels" toName="image">

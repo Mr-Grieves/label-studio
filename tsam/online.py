@@ -146,17 +146,18 @@ class OnlineTrainer:
         return np.asarray(logits), np.asarray(iou)
 
     def add(self, pairs: list[dict]) -> None:
-        """Queue one submitted annotation's pairs; an update starts once `samples_per_update` are waiting."""
+        """Queue one submitted annotation's pairs; each update takes the first `samples_per_update` queued."""
         if pairs:
             with self.queue_lock:
                 self.queue.append(pairs)
             self._start_update()
 
     def _start_update(self) -> None:
+        n = self.config.trainer.samples_per_update
         with self.queue_lock:
-            if self.updating or len(self.queue) < self.config.trainer.samples_per_update:
+            if self.updating or len(self.queue) < n:
                 return
-            annotations, self.queue, self.updating = self.queue, [], True
+            annotations, self.queue, self.updating = self.queue[:n], self.queue[n:], True
         threading.Thread(target=self._update, args=([p for a in annotations for p in a],), daemon=True).start()
 
     def _update(self, new: list[dict]) -> None:

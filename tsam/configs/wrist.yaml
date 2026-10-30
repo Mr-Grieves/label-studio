@@ -1,0 +1,53 @@
+project_id: 283795 # Wrist t-mode
+description: Online fine-tuning of T-SAM on the Wrist project
+experiment_name: sam
+run_name: tsam_boxes_wrist_online
+version: 0.3.0
+# continue_run_id: # resume this run instead of starting a new one
+
+structures:
+  conditioning: true # a learned offset per structure
+  mapping: # label names without their tool suffix ("ATFL [SAM]" -> ATFL)
+    Skin: [Skin]
+    Subcutaneous_Fat: [Subcutaneous_Fat, Subcutaneous_Layer]
+    Muscle: [Muscle]
+    Fat: [Fat]
+    Ligament: [Ligament, Flexor_Retinaculum]
+    Cartilage: [Cartilage]
+    Tendon: [Tendon, FDT, PLT, FPLT, FCUT]
+    Artery: [Artery, Ulnar_Artery, Radial_Artery]
+    Nerve: [Nerve, Median_Nerve, Ulnar_Nerve]
+    Bone: [Bone]
+
+model_config:
+  base_run_id: 4b3db0d33d134904a37892a222bb6951
+  prompt_encoder_frozen: false
+
+optimizer_config:
+  name: adamw
+  learning_rate: 1e-5 # 1e-4 rolled back every update in a short replay test (overnight-notes.md)
+
+trainer_config:
+  samples_per_update: 16
+  minibatch_size: 32 # image+label pairs per gradient step
+  box_jitter: 5
+  replay:
+    ratio: 1.0 # replayed pairs per new pair, shuffled in with them
+  augmentation:
+    - RandomFlip: {mode: vertical}
+    - RandomTranslation: {height_factor: 0.05, width_factor: 0.05, fill_mode: constant}
+    - RandomZoom: {height_factor: 0.1, fill_mode: constant}
+    - RandomBrightness: {factor: 0.1, value_range: [0, 1]}
+    - RandomContrast: {factor: 0.2, value_range: [0, 1]}
+  loss_function:
+    - key: mask
+      name: dice
+    - key: iou
+      name: mse
+      weight: 0.1
+
+test_config:
+  dataset_paths:
+    - wrist-megamask.shuffled.102.1137aad2ef9c424e99d66da96ae98eb6.tfrecord
+  batch_size: 32
+  acceptance_threshold: -0.01 # vs the best accepted test IoU

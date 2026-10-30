@@ -14,7 +14,8 @@ gunicorn worker.
 
 Online training (online.py, online-training.md): Label Studio's webhook on a submitted annotation
 calls fit(), which turns its polygons into training pairs and queues them; predictions use the
-trainer's live decoder, with the box's structure.
+trainer's live decoder, with the box's structure. A new run first backfills: it feeds the project's
+latest annotations through fit() at startup, as if they had just been submitted.
 
 Preprocessing matches isonoai's training pipeline: grayscale, /255, bilinear resize to 256x256.
 The box is given to the model as (x0, y0, x1, y1) in pixels of that 256 frame of the prescan image,
@@ -34,6 +35,7 @@ import cv2
 import keras
 import mlflow
 import numpy as np
+import requests
 import tensorflow as tf
 from label_studio_ml.model import LabelStudioMLBase
 from label_studio_ml.response import ModelResponse
@@ -262,6 +264,28 @@ class TSAMHandler:
         return postscan_mask
 
 
+def ls_get(path: str, **params) -> dict:
+    """GET from the Label Studio API at $LABEL_STUDIO_URL, with $LABEL_STUDIO_API_KEY."""
+    url = os.environ["LABEL_STUDIO_URL"].rstrip("/") + path
+    response = requests.get(url, params, headers={"Authorization": f"Token {os.environ['LABEL_STUDIO_API_KEY']}"})
+    response.raise_for_status()
+    return response.json()
+
+
+def annotated_tasks(project_id: int) -> list[dict]:
+    """Every task of the project with its annotations, a page at a time (app.heartex.com has no export endpoint)."""
+    tasks, page = [], 1
+    while True:
+        try:
+            batch = ls_get("/api/tasks", project=project_id, fields="all", page_size=100, page=page)["tasks"]
+        except requests.HTTPError as e:  # past the last page
+            if e.response.status_code == 404:
+                return tasks
+            raise
+        tasks += [task for task in batch if task["annotations"]]
+        page += 1
+
+
 class NewModel(LabelStudioMLBase):
     """TSAM: isonoai's box-only SAM, prompted with a box.
 
@@ -275,9 +299,28 @@ class NewModel(LabelStudioMLBase):
 
     @classmethod
     def configure(cls, config: Config) -> None:
-        """Load the model (the run's own, when continuing one) and start online training; every instance shares them."""
+        """Load the model (the run's own, when continuing one) and start online training; every instance shares them.
+        A new run first backfills."""
         cls.handler = TSAMHandler(config.continue_run_id or config.sam.base_run_id, EMBEDDING_CACHE_SIZE)
         cls.trainer = OnlineTrainer(config, cls.handler.sam, lambda key: cls.handler.preprocess_img(key)[0])
+        if not config.continue_run_id:
+            cls.backfill(config.trainer.backfill_limit)
+
+    @classmethod
+    def backfill(cls, limit: int | None) -> None:
+        """Feed the project's latest `limit` annotations (None: all) through fit(), oldest first, as if each had just
+        been submitted. This queues them; the updates train on them in the background."""
+        project_id = cls.trainer.config.project_id
+        project = ls_get(f"/api/projects/{project_id}")
+        model = cls(project_id=str(project_id), label_config=project["label_config"])
+        submitted = sorted(
+            ((annotation, task) for task in annotated_tasks(project_id) for annotation in task["annotations"]),
+            key=lambda pair: pair[0]["created_at"],
+        )
+        backfill = submitted if limit is None else submitted[max(len(submitted) - limit, 0) :]
+        logger.info(f"Backfilling {len(backfill)} of {len(submitted)} annotations of project {project['title']}")
+        for annotation, task in backfill:
+            model.fit("ANNOTATION_CREATED", {"annotation": annotation, "task": task})
 
     def setup(self):
         """Report the online-training run as the model version, so predictions say which model made them."""

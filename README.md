@@ -2,11 +2,12 @@
 
 A Label Studio ML backend that serves isonoai's box-only SAM for interactive segmentation:
 draw a box with the smart rectangle tool, get a mask back. The model is loaded from an isonoai
-MLflow training run at startup, and fine-tuned online on the project's labels as they're submitted
-(`tsam/online-training.md`); nothing from isonoai is imported.
+MLflow training run at startup, and fine-tuned online on the project's labels: a new run first on
+its latest `backfill_limit` labels, then on each as it's submitted (`tsam/online-training.md`).
+Nothing from isonoai is imported.
 
 - `tsam/` — the backend: `main.py` (entry point), `model.py` (prediction, and `fit()` for submitted
-  labels), `online.py` (online training), `data.py`, `config.py`, `replay.py` (replays a project's
+  labels), `online.py` (online training), `data.py`, `config.py`, `replay.py` (replays all of a project's
   existing labels through online training), `configs/` (one config per project), `utils/` (the SAM
   classes copied from isonoai, S3, pyconvert).
 - `plugins/` — Label Studio Enterprise plugins for the labeling screen (see `plugins/README.md`,
@@ -46,7 +47,7 @@ scp .env <server>:<path to this repo>/.env     # then, on the server: chmod 600 
 make install                        # once, and after dependency changes
 make run DATA_DIR=~/data            # serves on http://localhost:9094, with CONFIG's test set under ~/data
 make run CONFIG=<path to config>    # another project's config
-make replay DATA_DIR=~/data         # replay CONFIG's project's existing labels through online training
+make replay DATA_DIR=~/data         # replay all of CONFIG's project's labels through online training, then exit
 ```
 
 To debug, use the VS Code launch config **T-SAM backend (debug)**; its config path is set in

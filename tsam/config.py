@@ -44,6 +44,7 @@ class LossConfig(Strict):
 
 class TrainerConfig(Strict):
     samples_per_update: int  # submitted annotations per update
+    backfill_limit: int | None  # a new run first trains on the project's latest this many annotations; null: all
     minibatch_size: int  # image+label pairs per gradient step
     box_jitter: float
     replay: ReplayConfig
