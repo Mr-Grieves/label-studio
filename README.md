@@ -2,10 +2,13 @@
 
 A Label Studio ML backend that serves isonoai's box-only SAM for interactive segmentation:
 draw a box with the smart rectangle tool, get a mask back. The model is loaded from an isonoai
-MLflow training run at startup; nothing from isonoai is imported.
+MLflow training run at startup, and fine-tuned online on the project's labels as they're submitted
+(`tsam/online-training.md`); nothing from isonoai is imported.
 
-- `tsam/` — the backend: `main.py` (entry point), `model.py` (prediction), `utils/` (the SAM classes
-  copied from isonoai, S3, pyconvert).
+- `tsam/` — the backend: `main.py` (entry point), `model.py` (prediction, and `fit()` for submitted
+  labels), `online.py` (online training), `data.py`, `config.py`, `replay.py` (replays a project's
+  existing labels through online training), `configs/` (one config per project), `utils/` (the SAM
+  classes copied from isonoai, S3, pyconvert).
 - `plugins/` — Label Studio Enterprise plugins for the labeling screen (see `plugins/README.md`,
   which also has the labeling config the backend expects).
 
@@ -40,14 +43,15 @@ scp .env <server>:<path to this repo>/.env     # then, on the server: chmod 600 
 ## Run locally
 
 ```bash
-make install                   # once, and after dependency changes
-make run                       # serves on http://localhost:9094
-make run MLFLOW_ID=<run id>    # a different training run
+make install                        # once, and after dependency changes
+make run DATA_DIR=~/data            # serves on http://localhost:9094, with CONFIG's test set under ~/data
+make run CONFIG=<path to config>    # another project's config
+make replay DATA_DIR=~/data         # replay CONFIG's project's existing labels through online training
 ```
 
-To debug, use the VS Code launch config **T-SAM backend (debug)**: it runs `make secrets` first
-and loads `.env` (`.vscode/launch.json`, `.vscode/tasks.json`). Its MLflow run ID is set in
-`launch.json`.
+To debug, use the VS Code launch config **T-SAM backend (debug)**; its config path is set in
+`launch.json`. Label Studio sends submitted annotations to `fit()` only with "Start model training
+on annotation submission" on in the model's settings.
 
 ## Run in Docker
 
@@ -56,8 +60,8 @@ make docker-build              # once, and after code or dependency changes
 make docker-run                # serves on http://localhost:9094
 ```
 
-The model isn't baked into the image: it's downloaded from MLflow run `MLFLOW_ID` at startup, so
-a new model only needs `make docker-run MLFLOW_ID=<run id>`.
+The model isn't baked into the image: the base model is downloaded from MLflow at startup, as the
+config says. `DATA_DIR` (default `/data`) is mounted for the config's test set.
 
 ## Connecting Label Studio
 
@@ -76,12 +80,13 @@ Basic Authentication in Label Studio with the same values.
 
 | Variable / `make` option | Default | |
 |---|---|---|
-| `MLFLOW_ID` | see `Makefile` | The isonoai training run to serve |
+| `CONFIG` | `tsam/configs/foot-ankle.yaml` | The online-training config: base model, project, test set, training |
+| `DATA_DIR` | `/data` | Where the config's test tfrecords are |
 | `PORT` | `9094` | Host port |
 | `SMOOTH_SIGMA` | `2.5` | Gaussian smoothing of the mask logits, in pixels of the model's 256 frame; 0 = off |
 | `EMBEDDING_CACHE_SIZE` | `16` | Images whose embeddings are kept, so a new box on them only runs the decoder |
 | `LOG_LEVEL` | `INFO` | |
 
-`MLFLOW_ID` and `PORT` are `make` options (`make run PORT=9095`); the rest are environment
+`CONFIG`, `DATA_DIR` and `PORT` are `make` options (`make run PORT=9095`); the rest are environment
 variables, passed through to Docker too (`SMOOTH_SIGMA=3 make docker-run`).
 The embedding cache is per process, so the Docker image runs one gunicorn worker.

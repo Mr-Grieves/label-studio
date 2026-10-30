@@ -1,0 +1,3 @@
+# Operating Principle
+
+Less code the better. I want to be impressed by how simple and elegant the code is, not how much of it there is. And by this, I do not mean for you to try and do as much as you can in as few lines as possible. I am referring more the extraneous hoops that add very little to the performance, while ruining my ability to grok my repository. Do not add anything that we have not discussed, without asking me. And only ask me if you beleive it will have a major impact on the performance of the system. If you have an idea that might improve performance by 0.5%, bit will add 300 lines of code, don't do it.

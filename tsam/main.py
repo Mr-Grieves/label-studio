@@ -26,6 +26,7 @@ logging.config.dictConfig(
 from label_studio_ml.api import init_app
 
 # Imported as the `tsam` package, from the repo root (`python -m tsam.main`), like model.py's own imports.
+from tsam.config import load_config
 from tsam.model import NewModel
 
 _DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -92,10 +93,9 @@ if __name__ == "__main__":
         help="Additional LabelStudioMLBase model initialization kwargs",
     )
     parser.add_argument(
-        "--mlflow-id",
-        dest="mlflow_id",
-        default=os.environ.get("MLFLOW_ID"),
-        help="MLflow run ID of the SAM to serve (default: $MLFLOW_ID)",
+        "--config",
+        default=os.environ.get("CONFIG"),
+        help="The online-training config, e.g. tsam/configs/foot-ankle.yaml (default: $CONFIG)",
     )
     parser.add_argument(
         "--basic-auth-user", default=os.environ.get("ML_SERVER_BASIC_AUTH_USER", None), help="Basic auth user"
@@ -105,8 +105,8 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    if not args.mlflow_id:
-        parser.error("--mlflow-id (or $MLFLOW_ID) is required")
+    if not args.config:
+        parser.error("--config (or $CONFIG) is required")
     check_env()
 
     # setup logging level
@@ -141,7 +141,7 @@ if __name__ == "__main__":
         kwargs.update(parse_kwargs())
 
     # Load the model once, up front, so the first request doesn't pay for it and a bad run ID fails at startup.
-    NewModel.configure(args.mlflow_id)
+    NewModel.configure(load_config(args.config))
 
     if args.check:
         print('Check "' + NewModel.__name__ + '" instance creation..')
@@ -155,5 +155,5 @@ if __name__ == "__main__":
 else:
     # for uWSGI use
     check_env()
-    NewModel.configure(os.environ["MLFLOW_ID"])
+    NewModel.configure(load_config(os.environ["CONFIG"]))
     app = init_app(model_class=NewModel)

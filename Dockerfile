@@ -50,6 +50,6 @@ RUN --mount=type=secret,id=PRIVATE_REPO_GH_TOKEN \
 COPY . ./
 
 # NOTE: the model is NOT baked into the image. The backend downloads it from
-# MLflow run $MLFLOW_ID at startup, so a new model doesn't need a rebuild.
+# MLflow at startup, as $CONFIG says, so a new model doesn't need a rebuild.
 
 CMD ["./tsam/start.sh"]

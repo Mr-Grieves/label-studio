@@ -10,3 +10,4 @@
 # The backend
 !tsam/**/*.py
 !tsam/start.sh
+!tsam/configs/*.yaml

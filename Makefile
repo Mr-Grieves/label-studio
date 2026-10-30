@@ -1,7 +1,9 @@
-.PHONY: help install secrets run docker-build docker-run
+.PHONY: help install secrets run replay docker-build docker-run
 
-# The isonoai training run whose SAM to serve; override with `make run MLFLOW_ID=<run id>`
-MLFLOW_ID ?= 4b3db0d33d134904a37892a222bb6951
+# The online-training config (base model, project, test set...); override with `make run CONFIG=<path>`
+CONFIG ?= tsam/configs/foot-ankle.yaml
+# Where the config's test tfrecords are (isonoai's /data)
+DATA_DIR ?= /data
 # The host port the backend listens on (Label Studio, or a tunnel, points here)
 PORT ?= 9094
 IMAGE ?= tsam-backend
@@ -33,8 +35,11 @@ secrets: ## Decrypt the backend's secrets from isonoai's sops files into .env (g
 .env:
 	@$(MAKE) --no-print-directory secrets
 
-run: .env ## Run the backend locally on PORT, serving MLflow run MLFLOW_ID
-	.venv/bin/dotenv -f .env run -- .venv/bin/python -m tsam.main --port $(PORT) --mlflow-id $(MLFLOW_ID)
+run: .env ## Run the backend locally on PORT, with the online-training config CONFIG
+	DATA_DIR=$(DATA_DIR) .venv/bin/dotenv -f .env run -- .venv/bin/python -m tsam.main --port $(PORT) --config $(CONFIG)
+
+replay: .env ## Replay CONFIG's project's existing annotations through online training (tsam/replay.py)
+	DATA_DIR=$(DATA_DIR) .venv/bin/dotenv -f .env run -- .venv/bin/python -m tsam.replay --config $(CONFIG)
 
 # As isonoai's `make build`: $PRIVATE_REPO_GH_TOKEN, the token that can read the private pyconvert repo
 # (isonoai's docs/dev/contributing.md), passed as a build secret, so it's never in the image or its history.
@@ -50,7 +55,7 @@ docker-build: ## Build the Docker image (needs $PRIVATE_REPO_GH_TOKEN, as for is
 # (what `make run` uses), so the values never appear on the command line.
 # --init: a minimal init as PID 1. xvfb-run (tsam/start.sh) hangs as PID 1, waiting for a signal from
 # Xvfb that it never gets.
-docker-run: .env ## Run the Docker image on PORT, serving MLflow run MLFLOW_ID
+docker-run: .env ## Run the Docker image on PORT, with the online-training config CONFIG
 	BASIC_AUTH_USER="$$ML_SERVER_BASIC_AUTH_USER" BASIC_AUTH_PASS="$$ML_SERVER_BASIC_AUTH_PASS" \
-		docker run --init --rm -p $(PORT):9090 --env-file .env -e MLFLOW_ID=$(MLFLOW_ID) \
+		docker run --init --rm -p $(PORT):9090 --env-file .env -e CONFIG=$(CONFIG) -v $(DATA_DIR):/data:ro \
 		-e BASIC_AUTH_USER -e BASIC_AUTH_PASS -e SMOOTH_SIGMA -e EMBEDDING_CACHE_SIZE -e LOG_LEVEL $(IMAGE)
