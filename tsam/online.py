@@ -11,6 +11,7 @@ import logging
 import random
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -123,6 +124,7 @@ class OnlineTrainer:
         # The image encoder is frozen and test images aren't augmented, so their embeddings are computed once
         self.test_set = read_test_set(config.test.dataset_paths, self.label_structure)
         images = self.test_set["images"]  # kept for the examples
+        logger.info(f"Test set: {len(self.test_set['image'])} instances on {len(images)} images; embedding them")
         self.test_set["embeddings"] = np.concatenate(
             [self.encoder(images[i : i + 16], training=False) for i in range(0, len(images), 16)]
         )
@@ -169,22 +171,36 @@ class OnlineTrainer:
         """`steps_per_update` gradient steps, each on new and replayed pairs drawn at random (with replacement, so the
         same number of steps however many pairs there are); then accept it, or roll it back."""
         try:
-            t = self.config.trainer
+            t, update, start = self.config.trainer, self.step + 1, time.perf_counter()
+            replay = len(self.buffer)
+            logger.info(f"Update {update}: {t.steps_per_update} steps; {len(new)} new pairs, {replay} to replay")
             n_replay = round(t.minibatch_size * t.replay.ratio / (1 + t.replay.ratio)) if self.buffer else 0
             draw = lambda: random.choices(new, k=t.minibatch_size - n_replay) + random.choices(self.buffer, k=n_replay)
-            losses = [self._train_step(draw()) for _ in range(t.steps_per_update)]
+            losses = []
+            for i in range(1, t.steps_per_update + 1):
+                losses.append(self._train_step(draw()))
+                if i % 10 == 0 or i == t.steps_per_update:
+                    logger.info(f"Update {update}: step {i}/{t.steps_per_update}, loss {np.mean(losses[-10:]):.4f}")
             self.buffer += new
             self.step += 1
 
             metrics = self.test(self.train)
             accepted = metrics["test_iou"] - self.best >= self.config.test.acceptance_threshold
+            outcome = "accepted" if accepted else "rolled back"
+            logger.info(
+                f"Update {update}: test IoU {metrics['test_iou']:.4f} (best {self.best:.4f}), {outcome}, "
+                f"after {time.perf_counter() - start:.0f}s"
+            )
             if accepted:
                 with self.lock:
                     for live, train in zip(self.live.variables, self.train.variables):
                         live.assign(train)
                 self.best = max(self.best, metrics["test_iou"])
                 self.accepted = self._state()
+                start = time.perf_counter()
                 self._checkpoint()
+                elapsed = time.perf_counter() - start
+                logger.info(f"Update {update}: now serving predictions; logged to MLflow in {elapsed:.0f}s")
             else:
                 self._restore(self.accepted)
             self._log(
@@ -194,8 +210,6 @@ class OnlineTrainer:
                 new_pairs=len(new),
                 buffer_pairs=len(self.buffer),
             )
-            outcome = "accepted" if accepted else "rolled back"
-            logger.info(f"Update {self.step}: test IoU {metrics['test_iou']:.4f}, {outcome}")
         except Exception:
             logger.exception("Online update failed")
         finally:

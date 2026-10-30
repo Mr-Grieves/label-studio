@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections import OrderedDict, defaultdict
 from pathlib import Path
 from uuid import uuid4
@@ -284,6 +285,7 @@ def annotated_tasks(project_id: int) -> list[dict]:
                 return tasks
             raise
         tasks += [task for task in batch if task["annotations"]]
+        logger.info(f"Fetched {page * 100} tasks of project {project_id} so far: {len(tasks)} annotated")
         page += 1
 
 
@@ -302,10 +304,14 @@ class NewModel(LabelStudioMLBase):
     def configure(cls, config: Config) -> None:
         """Load the model (the run's own, when continuing one) and start online training; every instance shares them.
         A new run first backfills."""
+        start = time.perf_counter()
+        gpus = [device.name for device in tf.config.list_logical_devices("GPU")]
+        logger.info(f"TensorFlow runs on {', '.join(gpus) or 'the CPU only'}")
         cls.handler = TSAMHandler(config.continue_run_id or config.sam.base_run_id, EMBEDDING_CACHE_SIZE)
         cls.trainer = OnlineTrainer(config, cls.handler.sam, lambda key: cls.handler.preprocess_img(key)[0])
         if not config.continue_run_id:
             cls.backfill(config.trainer.backfill_limit)
+        logger.info(f"Ready for Label Studio after {time.perf_counter() - start:.0f}s")
 
     @classmethod
     def backfill(cls, limit: int | None) -> None:
@@ -320,8 +326,10 @@ class NewModel(LabelStudioMLBase):
         )
         backfill = submitted if limit is None else submitted[max(len(submitted) - limit, 0) :]
         logger.info(f"Backfilling {len(backfill)} of {len(submitted)} annotations of project {project['title']}")
-        for annotation, task in backfill:
+        for i, (annotation, task) in enumerate(backfill, 1):
             model.fit("ANNOTATION_CREATED", {"annotation": annotation, "task": task})
+            if i % 10 == 0 or i == len(backfill):
+                logger.info(f"Backfill: {i}/{len(backfill)} annotations queued; training runs in the background")
 
     def setup(self):
         """Report the online-training run as the model version, so predictions say which model made them."""
@@ -337,9 +345,15 @@ class NewModel(LabelStudioMLBase):
         task_data = data["task"]["data"]
         pairs = self.handler.annotation_pairs(task_data, task_data[value], data["annotation"]["result"], self.trainer)
         self.trainer.add(pairs)
+        queued, needed = len(self.trainer.queue), self.trainer.config.trainer.samples_per_update
+        logger.info(
+            f"Annotation {data['annotation']['id']} (task {data['task']['id']}): {len(pairs)} training pairs; "
+            f"{queued}/{needed} annotations toward the next update"
+        )
 
     def predict(self, tasks: list[dict], context: dict | None = None, **kwargs) -> ModelResponse:
         """Returns the mask for the latest box drawn on this image."""
+        start = time.perf_counter()
         from_name, to_name, value = self.get_first_tag_occurence("BrushLabels", "Image")
         if not context or not context.get("result"):
             logger.warning("No context! -- cannot make a prediction.")
@@ -374,6 +388,8 @@ class NewModel(LabelStudioMLBase):
         # Low-res logits -> mask in Label Studio's post-scan frame.
         postscan_mask = self.handler.convert_mask_to_postscan(logits, blob_key, ts)
         score = float(np.clip(np.asarray(iou)[0], 0.0, 1.0))  # the IoU head's estimate of this mask's quality
+        elapsed = time.perf_counter() - start
+        logger.info(f"Predicted {label} on task {task['id']} in {elapsed:.2f}s; estimated IoU {score:.2f}")
 
         return ModelResponse(
             predictions=[
