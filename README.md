@@ -10,6 +10,7 @@ Nothing from isonoai is imported.
   labels), `online.py` (online training), `data.py`, `config.py`, `replay.py` (replays all of a project's
   existing labels through online training), `configs/` (one config per project), `utils/` (the SAM
   classes copied from isonoai, S3, pyconvert).
+- `tests/` — tests of the backend, run offline against a tiny SAM and a local MLflow.
 - `plugins/` — Label Studio Enterprise plugins for the labeling screen (see `plugins/README.md`,
   which also has the labeling config the backend expects).
 
@@ -48,6 +49,7 @@ make install                        # once, and after dependency changes
 make run DATA_DIR=~/data            # serves on http://localhost:9094, with CONFIG's test set under ~/data
 make run CONFIG=<path to config>    # another project's config
 make replay DATA_DIR=~/data         # replay all of CONFIG's project's labels through online training, then exit
+.venv/bin/pytest                    # the tests (tests/): offline, ~40 s
 ```
 
 To debug, use the VS Code launch config **T-SAM backend (debug)**; its config path is set in
@@ -63,6 +65,11 @@ make docker-run                # serves on http://localhost:9094
 
 The model isn't baked into the image: the base model is downloaded from MLflow at startup, as the
 config says. `DATA_DIR` (default `/data`) is mounted for the config's test set.
+
+The image runs TensorFlow on the GPU: it has TensorFlow's CUDA libraries, and `make docker-run`
+passes the host's GPUs (`--gpus all`), which needs the NVIDIA driver and the NVIDIA Container Toolkit
+on the host. TensorFlow takes GPU memory as it needs it, so the GPU can be shared. On a machine
+without an NVIDIA GPU, run `make docker-run GPUS=`.
 
 ## Connecting Label Studio
 
@@ -84,10 +91,11 @@ Basic Authentication in Label Studio with the same values.
 | `CONFIG` | `tsam/configs/foot-ankle.yaml` | The online-training config: base model, project, test set, training |
 | `DATA_DIR` | `/data` | Where the config's test tfrecords are |
 | `PORT` | `9094` | Host port |
+| `GPUS` | `all` | The GPUs `make docker-run` gives the container; empty (`GPUS=`) for CPU only, e.g. on a Mac |
 | `SMOOTH_SIGMA` | `2.5` | Gaussian smoothing of the mask logits, in pixels of the model's 256 frame; 0 = off |
 | `EMBEDDING_CACHE_SIZE` | `16` | Images whose embeddings are kept, so a new box on them only runs the decoder |
 | `LOG_LEVEL` | `INFO` | |
 
-`CONFIG`, `DATA_DIR` and `PORT` are `make` options (`make run PORT=9095`); the rest are environment
+`CONFIG`, `DATA_DIR`, `PORT` and `GPUS` are `make` options (`make run PORT=9095`); the rest are environment
 variables, passed through to Docker too (`SMOOTH_SIGMA=3 make docker-run`).
 The embedding cache is per process, so the Docker image runs one gunicorn worker.

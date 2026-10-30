@@ -11,7 +11,11 @@ label-studio-ml = { git = "https://github.com/HumanSignal/label-studio-ml-backen
 pillow = "*"
 # TF 2.20 runs the SavedModels (exported with isonoai's TF 2.18) with the same
 # outputs to ~1e-5, and unlike 2.18 allows the numpy>=2.2 label-studio-sdk needs.
-tensorflow = "2.20.*"
+# On Linux (the Docker image) with its CUDA libraries, for the GPU; they have no macOS wheels.
+tensorflow = [
+    { version = "2.20.*", extras = ["and-cuda"], markers = "sys_platform == 'linux'" },
+    { version = "2.20.*", markers = "sys_platform != 'linux'" },
+]
 # Same versions as isonoai, which trains and logs the model: mlflow loads it from
 # the training run, and Keras rebuilds it with the version that saved it.
 keras = "3.10.0"
@@ -37,3 +41,12 @@ priority = "explicit"
 [build-system]
 build-backend = "poetry.core.masonry.api"
 requires = ["poetry-core>=1.0.0"]
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.2.0,<10.0.0)"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]  # so the tests import tsam
+testpaths = ["tests"]

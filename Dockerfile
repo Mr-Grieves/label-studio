@@ -22,6 +22,8 @@ RUN --mount=type=cache,target="/var/cache/apt",sharing=locked \
 
 # Poetry in its own venv; the app's venv is /app/.venv (poetry.toml: in-project).
 # WORKERS=1: the embedding cache in tsam/model.py is per process.
+# TF_FORCE_GPU_ALLOW_GROWTH: take GPU memory as needed, rather than nearly all of it at startup, so the GPU can be
+# shared.
 RUN python3.12 -m venv /opt/poetry && /opt/poetry/bin/pip install --no-cache-dir "poetry==${POETRY_VERSION}"
 ENV PATH=/app/.venv/bin:/opt/poetry/bin:$PATH \
     PYTHONUNBUFFERED=1 \
@@ -30,6 +32,7 @@ ENV PATH=/app/.venv/bin:/opt/poetry/bin:$PATH \
     WORKERS=1 \
     THREADS=4 \
     TF_CPP_MIN_LOG_LEVEL=1 \
+    TF_FORCE_GPU_ALLOW_GROWTH=true \
     QT_QPA_PLATFORM=offscreen
 
 # Dependencies, as in isonoai's image: a GitHub token (build secret

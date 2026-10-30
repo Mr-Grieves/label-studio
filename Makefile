@@ -7,6 +7,9 @@ DATA_DIR ?= /data
 # The host port the backend listens on (Label Studio, or a tunnel, points here)
 PORT ?= 9094
 IMAGE ?= tsam-backend
+# The GPUs docker-run gives the container (docker run --gpus; needs the NVIDIA Container Toolkit); empty for none,
+# e.g. on a Mac: `make docker-run GPUS=`
+GPUS ?= all
 # isonoai's checkout, for its sops-encrypted secrets
 ISONOAI ?= ../isonoai
 # The secrets files the backend needs (see tsam/main.py's check_env)
@@ -57,5 +60,5 @@ docker-build: ## Build the Docker image (needs $PRIVATE_REPO_GH_TOKEN, as for is
 # Xvfb that it never gets.
 docker-run: .env ## Run the Docker image on PORT, with the online-training config CONFIG
 	BASIC_AUTH_USER="$$ML_SERVER_BASIC_AUTH_USER" BASIC_AUTH_PASS="$$ML_SERVER_BASIC_AUTH_PASS" \
-		docker run --init --rm -p $(PORT):9090 --env-file .env -e CONFIG=$(CONFIG) -v $(DATA_DIR):/data:ro \
+		docker run --init --rm $(if $(GPUS),--gpus $(GPUS)) -p $(PORT):9090 --env-file .env -e CONFIG=$(CONFIG) -v $(DATA_DIR):/data:ro \
 		-e BASIC_AUTH_USER -e BASIC_AUTH_PASS -e SMOOTH_SIGMA -e EMBEDDING_CACHE_SIZE -e LOG_LEVEL $(IMAGE)
