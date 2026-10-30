@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 import cloudpickle
+import cv2
 import keras
 import mlflow
 import numpy as np
@@ -22,12 +23,13 @@ import tensorflow as tf
 
 import tsam.utils
 from tsam.config import Config
-from tsam.data import augment, build_augmentation, mask_box, rasterize, read_test_set, structure_ids
+from tsam.data import augment, build_augmentation, draw, mask_box, rasterize, read_test_set, structure_ids
 
 logger = logging.getLogger(__name__)
 
 MODEL = "model"  # the run's latest accepted SAM, logged as isonoai logs its models
 CHECKPOINT = "checkpoint"  # what resuming needs besides it: structure offsets, replay buffer, step, best test IoU
+EXAMPLES = 20  # test images drawn to examples/base (the base T-SAM) and examples/deployed (the latest accepted one)
 
 # mlflow.tensorflow pickles Keras's registered classes along with the model. By value, so that isonoai, which has no
 # tsam, can load it with mlflow.tensorflow.load_model as it loads its own models.
@@ -43,10 +45,12 @@ def mask_iou(logits: tf.Tensor, masks: tf.Tensor) -> tf.Tensor:
 
 
 def dice_loss(logits: tf.Tensor, masks: tf.Tensor) -> tf.Tensor:
-    """1 - isonoai's dice coefficient: V-Net's soft Dice over the whole batch, smoothing 1."""
+    """1 - isonoai's dice coefficient (V-Net's soft Dice, smoothing 1), but per instance and averaged rather than over
+    the whole batch, so a small instance counts as much as a large one, as in the test IoU."""
     prob = tf.sigmoid(logits)
-    inter = tf.reduce_sum(masks * prob)
-    return 1 - (2 * inter + 1) / (tf.reduce_sum(masks**2) + tf.reduce_sum(prob**2) + 1)
+    inter = tf.reduce_sum(masks * prob, axis=[1, 2])
+    dice = (2 * inter + 1) / (tf.reduce_sum(masks**2, axis=[1, 2]) + tf.reduce_sum(prob**2, axis=[1, 2]) + 1)
+    return 1 - tf.reduce_mean(dice)
 
 
 # (key, name) in the config's loss_function -> loss of (mask logits, predicted IoU, masks)
@@ -118,7 +122,7 @@ class OnlineTrainer:
 
         # The image encoder is frozen and test images aren't augmented, so their embeddings are computed once
         self.test_set = read_test_set(config.test.dataset_paths, self.label_structure)
-        images = self.test_set.pop("images")
+        images = self.test_set["images"]  # kept for the examples
         self.test_set["embeddings"] = np.concatenate(
             [self.encoder(images[i : i + 16], training=False) for i in range(0, len(images), 16)]
         )
@@ -135,6 +139,7 @@ class OnlineTrainer:
             metrics = self.test(self.train)
             self.best = metrics["test_iou"]
             self._log(metrics)
+            self._log_examples("base")
         self.accepted = self._state()
         logger.info(f"Online training into MLflow run {self.run_id}, from step {self.step}; test IoU {self.best:.4f}")
 
@@ -161,13 +166,13 @@ class OnlineTrainer:
         threading.Thread(target=self._update, args=([p for a in annotations for p in a],), daemon=True).start()
 
     def _update(self, new: list[dict]) -> None:
-        """One pass over the new pairs and as many replayed ones, shuffled; then accept it, or roll it back."""
+        """`steps_per_update` gradient steps, each on new and replayed pairs drawn at random (with replacement, so the
+        same number of steps however many pairs there are); then accept it, or roll it back."""
         try:
-            n_replay = min(round(self.config.trainer.replay.ratio * len(new)), len(self.buffer))
-            pairs = new + random.sample(self.buffer, n_replay)
-            random.shuffle(pairs)
-            size = self.config.trainer.minibatch_size
-            losses = [self._train_step(pairs[i : i + size]) for i in range(0, len(pairs), size)]
+            t = self.config.trainer
+            n_replay = round(t.minibatch_size * t.replay.ratio / (1 + t.replay.ratio)) if self.buffer else 0
+            draw = lambda: random.choices(new, k=t.minibatch_size - n_replay) + random.choices(self.buffer, k=n_replay)
+            losses = [self._train_step(draw()) for _ in range(t.steps_per_update)]
             self.buffer += new
             self.step += 1
 
@@ -187,7 +192,6 @@ class OnlineTrainer:
                 train_loss=float(np.mean(losses)),
                 accepted=float(accepted),
                 new_pairs=len(new),
-                replayed_pairs=n_replay,
                 buffer_pairs=len(self.buffer),
             )
             outcome = "accepted" if accepted else "rolled back"
@@ -258,6 +262,22 @@ class OnlineTrainer:
             (checkpoint / "buffer.json").write_text(json.dumps(self.buffer))
             (checkpoint / "progress.json").write_text(json.dumps({"step": self.step, "best": self.best}))
             self.mlflow.log_artifacts(self.run_id, str(checkpoint), CHECKPOINT)
+        self._log_examples("deployed")
+
+    def _log_examples(self, name: str) -> None:
+        """Log the first EXAMPLES test images to examples/<name>: each its labels (left) beside the training
+        decoder's masks from their boxes (right)."""
+        t = self.test_set
+        with tempfile.TemporaryDirectory() as folder:
+            for image in np.unique(t["image"])[:EXAMPLES]:
+                pairs = np.flatnonzero(t["image"] == image)
+                masks, structures = t["mask"][pairs], t["structure"][pairs]
+                boxes = mask_box(tf.constant(masks, tf.float32))
+                logits, _ = self.train(t["embeddings"][t["image"][pairs]], boxes, tf.constant(structures))
+                boxes, predicted = boxes.numpy(), logits.numpy() > 0
+                panels = [draw(t["images"][image], m, boxes, structures, self.structures) for m in (masks, predicted)]
+                cv2.imwrite(f"{folder}/{image:03d}.png", np.hstack(panels))
+            self.mlflow.log_artifacts(self.run_id, folder, f"examples/{name}")
 
     def _resume(self) -> float:
         """Restore the run's checkpoint; the SAM is already its model (model.py). Returns its best test IoU.

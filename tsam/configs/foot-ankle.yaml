@@ -28,9 +28,10 @@ trainer_config:
   samples_per_update: 32
   backfill_limit: 100 # a new run first trains on the project's latest 100 annotations
   minibatch_size: 32 # image+label pairs per gradient step
+  steps_per_update: 12 # each on a minibatch drawn from the update's new pairs and the replay buffer
   box_jitter: 5
   replay:
-    ratio: 1.0 # replayed pairs per new pair, shuffled in with them
+    ratio: 1.0 # replayed pairs per new pair in each minibatch
   augmentation:
     - RandomFlip: {mode: vertical}
     - RandomTranslation: {height_factor: 0.05, width_factor: 0.05, fill_mode: constant}

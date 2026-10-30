@@ -33,7 +33,7 @@ class OptimizerConfig(BaseModel):
 
 
 class ReplayConfig(Strict):
-    ratio: float  # replayed pairs per new pair
+    ratio: float  # replayed pairs per new pair in each minibatch
 
 
 class LossConfig(Strict):
@@ -46,6 +46,7 @@ class TrainerConfig(Strict):
     samples_per_update: int  # submitted annotations per update
     backfill_limit: int | None  # a new run first trains on the project's latest this many annotations; null: all
     minibatch_size: int  # image+label pairs per gradient step
+    steps_per_update: int  # gradient steps per update, each on a minibatch drawn from its new and replayed pairs
     box_jitter: float
     replay: ReplayConfig
     augmentation: list[dict[str, dict[str, Any]]]  # keras.layers class name -> its arguments

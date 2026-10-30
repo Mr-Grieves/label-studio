@@ -1,12 +1,14 @@
 """Training and test data for online training, all in the model's 256 x 256 prescan frame.
 
-A pair is one image and one label's mask (all its polygons on that image combined), as isonoai's SAMDataset trains
-T-SAM on. Training pairs are records {"image": prescan S3 key, "structure": index, "polygons": [[[x, y], ...], ...]}
-that are rasterized when used; test pairs come from a tfrecord of `pre_scan_image` and `{label}/pre_scan_mask`s.
+A pair is one image and one instance of a structure on it: a connected component of its label's mask, as a user boxes
+it in Label Studio. Training pairs are records {"image": prescan S3 key, "structure": index, "polygons":
+[[[x, y], ...], ...]}, the polygons forming that component, rasterized when used; test pairs are the components of the
+`{label}/pre_scan_mask`s in a tfrecord of them and `pre_scan_image`.
 """
 
 import os
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,7 @@ import numpy as np
 import tensorflow as tf
 
 INPUT_SIZE = 256  # the model's input frame (as trained); boxes are in its pixels
-MIN_PIXELS = 10  # smaller masks are left out, as isonoai's SAMDataset does
+MIN_PIXELS = 10  # smaller components are left out, as isonoai's SAMDataset leaves out masks
 
 
 def label_name(label: str) -> str:
@@ -35,6 +37,24 @@ def rasterize(polygons: list) -> np.ndarray:
     return cv2.fillPoly(mask, [np.round(p).astype(np.int32) for p in polygons], 1)
 
 
+def components(mask: np.ndarray) -> list[np.ndarray]:
+    """A (256, 256) mask's 8-connected components of at least MIN_PIXELS, each as a uint8 mask."""
+    n, labels = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+    return [c for c in ((labels == i).astype(np.uint8) for i in range(1, n)) if c.sum() >= MIN_PIXELS]
+
+
+def instances(polygons: list) -> list[list]:
+    """One label's polygons on an image, grouped by the component of their combined mask that each lies in: a group
+    per instance of the structure. Components under MIN_PIXELS are left out."""
+    _, labels = cv2.connectedComponents(rasterize(polygons), connectivity=8)
+    groups = defaultdict(list)
+    for polygon in polygons:
+        pixels = labels[rasterize([polygon]) > 0]
+        if pixels.size:
+            groups[np.bincount(pixels).argmax()].append(polygon)
+    return [group for group in groups.values() if rasterize(group).sum() >= MIN_PIXELS]
+
+
 def mask_box(mask: tf.Tensor, jitter: float = 0.0) -> tf.Tensor:
     """(B, 256, 256) masks, none empty -> (B, 4) boxes (x0, y0, x1, y1): the pixels at each mask's extremes,
     each coordinate shifted by up to `jitter` pixels, then clipped to the frame. Ported from isonoai's sam_utils."""
@@ -51,6 +71,30 @@ def mask_box(mask: tf.Tensor, jitter: float = 0.0) -> tf.Tensor:
     box = tf.clip_by_value(box + tf.random.uniform(tf.shape(box), -jitter, jitter), 0.0, INPUT_SIZE - 1.0)
     # Jitter can cross a thin box's corners over: keep (x0, y0) the top-left
     return tf.concat([tf.minimum(box[:, :2], box[:, 2:]), tf.maximum(box[:, :2], box[:, 2:])], axis=-1)
+
+
+def draw(image: np.ndarray, masks: np.ndarray, boxes: np.ndarray, structures: np.ndarray, names: list) -> np.ndarray:
+    """A (256, 256, 1) prescan image in [0, 1], twice as large, with (N, 256, 256) masks filled and outlined, and their
+    (N, 4) boxes and structure names, each structure in its own color -> (512, 512, 3) uint8 BGR. Rotated 90 degrees
+    clockwise, to show the prescan frame upright."""
+    size = 2 * INPUT_SIZE
+    image, masks = np.ascontiguousarray(np.rot90(image, -1)), np.ascontiguousarray(np.rot90(masks, -1, axes=(1, 2)))
+    x0, y0, x1, y1 = np.moveaxis(boxes, -1, 0)
+    boxes = np.stack([INPUT_SIZE - 1 - y1, x0, INPUT_SIZE - 1 - y0, x1], axis=-1)
+    canvas = cv2.cvtColor(cv2.resize(np.uint8(image[..., 0] * 255), (size, size)), cv2.COLOR_GRAY2BGR)
+    palette = cv2.applyColorMap(np.uint8((np.arange(len(names)) + 0.5) * 255 / len(names))[:, None], cv2.COLORMAP_TURBO)
+    masks = [cv2.resize(np.uint8(m), (size, size), interpolation=cv2.INTER_NEAREST) for m in masks]
+    fill = canvas.copy()
+    for mask, s in zip(masks, structures):
+        fill[mask > 0] = palette[s, 0]
+    canvas = cv2.addWeighted(canvas, 0.6, fill, 0.4, 0)
+    for mask, box, s in zip(masks, np.round(2 * boxes).astype(int), structures):
+        color = palette[s, 0].tolist()
+        cv2.drawContours(canvas, cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0], -1, color, 1)
+        cv2.rectangle(canvas, tuple(box[:2]), tuple(box[2:]), color, 1)
+        corner = (box[0], max(box[1] - 3, 10))
+        cv2.putText(canvas, names[s], corner, cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+    return canvas
 
 
 def build_augmentation(specs: list[dict[str, dict[str, Any]]]) -> list[keras.layers.Layer]:
@@ -82,7 +126,8 @@ def to_model_frame(image: tf.Tensor) -> tf.Tensor:
 
 
 def read_test_set(paths: list[Path], label_structure: dict[str, int]) -> dict[str, np.ndarray]:
-    """The test pairs of every mapped label in the tfrecords at `paths` (relative ones under $DATA_DIR).
+    """The test pairs of every mapped label in the tfrecords at `paths` (relative ones under $DATA_DIR): one per
+    component of its mask.
 
     Returns:
         `images` (N, 256, 256, 1), and per pair: `image` (its index in `images`), `mask` (256, 256) uint8, and
@@ -97,9 +142,8 @@ def read_test_set(paths: list[Path], label_structure: dict[str, int]) -> dict[st
                 if label == key or label not in label_structure or not feature.bytes_list.value:
                     continue
                 mask = tf.io.decode_png(feature.bytes_list.value[0], channels=1)
-                mask = tf.image.resize(mask, (INPUT_SIZE, INPUT_SIZE), method="nearest")[..., 0].numpy() > 0
-                if mask.sum() >= MIN_PIXELS:
-                    pairs.append((len(images), mask.astype(np.uint8), label_structure[label]))
+                mask = tf.image.resize(mask, (INPUT_SIZE, INPUT_SIZE), method="nearest")[..., 0].numpy()
+                pairs += [(len(images), c, label_structure[label]) for c in components(mask)]
             if pairs and pairs[-1][0] == len(images):  # this record has a pair
                 images.append(to_model_frame(tf_decode_image(features["pre_scan_image"].bytes_list.value[0], 1)))
     image, mask, structure = zip(*pairs)

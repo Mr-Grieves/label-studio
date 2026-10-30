@@ -43,7 +43,7 @@ from label_studio_sdk.converter import brush
 from pyconvert.lib import pyconvert
 
 from tsam.config import Config
-from tsam.data import INPUT_SIZE, label_name
+from tsam.data import INPUT_SIZE, instances, label_name
 from tsam.online import OnlineTrainer
 from tsam.utils.pyconvert_utils import (
     convert_mask_to_postscan,
@@ -234,8 +234,8 @@ class TSAMHandler:
         return np.array([x0, y0, x1, y1], dtype=np.float32)
 
     def annotation_pairs(self, task_data: dict, image_url: str, results: list[dict], trainer: OnlineTrainer) -> list:
-        """A submitted annotation's training pairs: one per mapped label, all its polygons on the image combined
-        (data.py). Polygons that don't convert to the prescan frame are left out."""
+        """A submitted annotation's training pairs: one per instance of each mapped label, i.e. per component of its
+        polygons on the image (data.py). Polygons that don't convert to the prescan frame are left out."""
         prescan_key, blob_key, ts = self.locate(task_data, image_url)
         polygons = defaultdict(list)
         for result in results:
@@ -249,8 +249,9 @@ class TSAMHandler:
             if points is not None:
                 polygons[name].append(points.tolist())
         return [
-            {"image": prescan_key, "structure": trainer.label_structure[name], "polygons": p}
+            {"image": prescan_key, "structure": trainer.label_structure[name], "polygons": instance}
             for name, p in polygons.items()
+            for instance in instances(p)
         ]
 
     def convert_mask_to_postscan(self, logits: np.ndarray, blob_key: str, timestamp: int) -> np.ndarray:
