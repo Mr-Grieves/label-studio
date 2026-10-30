@@ -38,6 +38,8 @@ ENV PATH=/app/.venv/bin:/opt/poetry/bin:$PATH \
 # Dependencies, as in isonoai's image: a GitHub token (build secret
 # PRIVATE_REPO_GH_TOKEN, see the Makefile's docker-build) gives the private-repo plugin
 # access to pyconvert; it's removed again before the layer is committed.
+# The plugin goes in with Poetry's pip, not `poetry self add`: that upgrades Poetry's own dependencies while it
+# runs, and breaks when one of them has a new release (it imports the new virtualenv over the old one).
 COPY pyproject.toml poetry.lock poetry.toml ./
 RUN --mount=type=secret,id=PRIVATE_REPO_GH_TOKEN \
     --mount=type=cache,target=/root/.cache/pypoetry,sharing=locked \
@@ -45,7 +47,7 @@ RUN --mount=type=secret,id=PRIVATE_REPO_GH_TOKEN \
     poetry config pypi-token.pyisonosw "$(cat /run/secrets/PRIVATE_REPO_GH_TOKEN)" && \
     git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$(cat /run/secrets/PRIVATE_REPO_GH_TOKEN)" | base64 | tr -d '\n')" \
         clone --depth 1 https://github.com/clariusmhealth/pypi-private-repo /tmp/pypi-private-repo && \
-    poetry self add /tmp/pypi-private-repo && \
+    /opt/poetry/bin/pip install --no-cache-dir /tmp/pypi-private-repo && \
     poetry install --no-interaction --no-root && \
     rm -rf /tmp/pypi-private-repo && \
     poetry config --unset pypi-token.pyisonosw
