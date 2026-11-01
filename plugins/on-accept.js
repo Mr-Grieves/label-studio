@@ -1,20 +1,3 @@
-/**
- * effsam: tidy up a predicted mask once it's accepted (with its check mark, or "accept all").
- *
- *  1. It loses any pixels already covered by other regions on the image (masks or polygons, any
- *     label): regions mustn't overlap, and the model doesn't know about the others.
- *  2. It becomes a polygon with the same label, which is easier to edit than a mask: the outer
- *     boundary of its largest piece, simplified as in isonoai's get_contours_from_mask
- *     (portal/label_studio/scripts/add_predictions.py).
- *  3. Once no other prediction is pending, the smart clicks are deleted. Label Studio sends the
- *     backend every smart keypoint with the clicked one's label, so leftover clicks would also
- *     prompt the next mask. ("Accept all" deletes them itself; the check mark doesn't.)
- *
- * Needs a <PolygonLabels> on the same image with a label for each <BrushLabels> label: its name
- * without the tool suffix ("Effusion [SAM]" -> "Effusion").
- * Without it, or if the polygon would have under MIN_POLYGON_POINTS points, the mask is left as
- * it was -- overlap included -- and the console says why.
- */
 (() => {
   const POLL_MS = 250;
   // As isonoai's PostprocessConfig: simplification tolerance = EPSILON * sqrt(perimeter in pixels)

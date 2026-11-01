@@ -23,6 +23,7 @@ mlflow = "3.15.1"
 # Reads the prescan images and blob JSONs from S3
 boto3 = "^1.43"
 opencv-python-headless = ">=4.12,<4.13"  # label-studio-sdk caps <4.13
+tqdm = "^4.70.1"  # the backfill's progress bar
 # Clarius's private package, pinned to isonoai's version (see the source below).
 pyconvert = { version = "13.2.0.dev20261026124343+3da6b38e3d", source = "pyisonosw" }
 
@@ -33,6 +34,7 @@ pyconvert = { version = "13.2.0.dev20261026124343+3da6b38e3d", source = "pyisono
 #   poetry config pypi-token.pyisonosw $(gh auth token)
 # "explicit" (isonoai uses "primary"): only packages that name this source are
 # looked up there, so everything else resolves from PyPI without GitHub API calls.
+
 [[tool.poetry.source]]
 name = "pyisonosw"
 url = "https://github.com/clariusmhealth/pypi-private-repo"

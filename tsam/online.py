@@ -6,6 +6,7 @@ is copied into the live copy that predictions use, and logged to the project's M
 otherwise training is rolled back to the last accepted state.
 """
 
+import functools
 import json
 import logging
 import random
@@ -35,6 +36,12 @@ EXAMPLES = 20  # test images drawn to examples/base (the base T-SAM) and example
 # mlflow.tensorflow pickles Keras's registered classes along with the model. By value, so that isonoai, which has no
 # tsam, can load it with mlflow.tensorflow.load_model as it loads its own models.
 cloudpickle.register_pickle_by_value(tsam.utils)  # the SAM classes copied from isonoai
+
+# What MLflow would infer for the logged model, as isonoai's list; given, so it doesn't load the model in a subprocess
+# to infer them (slow, and it fails here).
+REQUIREMENTS = [f"tensorflow=={tf.__version__}", f"cloudpickle=={cloudpickle.__version__}"]
+# isonoai's models have no signature either; MLflow warns about that at every save.
+logging.getLogger("mlflow.tensorflow").setLevel(logging.ERROR)
 
 
 def mask_iou(logits: tf.Tensor, masks: tf.Tensor) -> tf.Tensor:
@@ -96,7 +103,10 @@ class OnlineTrainer:
     def __init__(self, config: Config, sam: keras.Model, load_image: Callable[[str], tf.Tensor]):
         """`sam` is the generic T-SAM, or with `continue_run_id`, that run's model. `load_image(prescan_key)` gives that
         prescan image as (256, 256, 1) float32 in [0, 1]."""
-        self.config, self.sam, self.encoder, self.load_image = config, sam, sam.image_encoder, load_image
+        self.config, self.sam, self.encoder = config, sam, sam.image_encoder
+        # Kept in memory (256 KB each): every step loads its minibatch's images, mostly ones loaded before, and S3 takes
+        # ~0.1 s per image, many times the GPU's time for the step.
+        self.load_image = functools.cache(load_image)
         self.structures = list(config.structures.mapping)
         self.label_structure = structure_ids(config.structures.mapping)
         n, conditioning = len(self.structures), config.structures.conditioning
@@ -171,36 +181,22 @@ class OnlineTrainer:
         """`steps_per_update` gradient steps, each on new and replayed pairs drawn at random (with replacement, so the
         same number of steps however many pairs there are); then accept it, or roll it back."""
         try:
-            t, update, start = self.config.trainer, self.step + 1, time.perf_counter()
-            replay = len(self.buffer)
-            logger.info(f"Update {update}: {t.steps_per_update} steps; {len(new)} new pairs, {replay} to replay")
+            t, start, replay, best = self.config.trainer, time.perf_counter(), len(self.buffer), self.best
             n_replay = round(t.minibatch_size * t.replay.ratio / (1 + t.replay.ratio)) if self.buffer else 0
             draw = lambda: random.choices(new, k=t.minibatch_size - n_replay) + random.choices(self.buffer, k=n_replay)
-            losses = []
-            for i in range(1, t.steps_per_update + 1):
-                losses.append(self._train_step(draw()))
-                if i % 10 == 0 or i == t.steps_per_update:
-                    logger.info(f"Update {update}: step {i}/{t.steps_per_update}, loss {np.mean(losses[-10:]):.4f}")
+            losses = [self._train_step(draw()) for _ in range(t.steps_per_update)]
             self.buffer += new
             self.step += 1
 
             metrics = self.test(self.train)
             accepted = metrics["test_iou"] - self.best >= self.config.test.acceptance_threshold
-            outcome = "accepted" if accepted else "rolled back"
-            logger.info(
-                f"Update {update}: test IoU {metrics['test_iou']:.4f} (best {self.best:.4f}), {outcome}, "
-                f"after {time.perf_counter() - start:.0f}s"
-            )
             if accepted:
                 with self.lock:
                     for live, train in zip(self.live.variables, self.train.variables):
                         live.assign(train)
                 self.best = max(self.best, metrics["test_iou"])
                 self.accepted = self._state()
-                start = time.perf_counter()
                 self._checkpoint()
-                elapsed = time.perf_counter() - start
-                logger.info(f"Update {update}: now serving predictions; logged to MLflow in {elapsed:.0f}s")
             else:
                 self._restore(self.accepted)
             self._log(
@@ -209,6 +205,11 @@ class OnlineTrainer:
                 accepted=float(accepted),
                 new_pairs=len(new),
                 buffer_pairs=len(self.buffer),
+            )
+            outcome, iou = "accepted" if accepted else "rolled back", metrics["test_iou"]
+            logger.info(
+                f"Update {self.step}: loss {np.mean(losses):.4f}, test IoU {iou:.4f} (best {best:.4f}), {outcome}, "
+                f"in {time.perf_counter() - start:.0f}s ({len(new)} new pairs, {replay} in replay)"
             )
         except Exception:
             logger.exception("Online update failed")
@@ -267,7 +268,7 @@ class OnlineTrainer:
         """Log the accepted SAM (the live one) to the run, and what resuming needs besides it."""
         with tempfile.TemporaryDirectory() as folder:
             model, checkpoint = Path(folder) / MODEL, Path(folder) / CHECKPOINT
-            mlflow.tensorflow.save_model(self.sam, str(model))
+            mlflow.tensorflow.save_model(self.sam, str(model), pip_requirements=REQUIREMENTS)
             self.mlflow.log_artifacts(self.run_id, str(model), MODEL)
             checkpoint.mkdir()
             if self.live.offsets is not None:

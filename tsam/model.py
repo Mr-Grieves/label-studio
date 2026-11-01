@@ -42,6 +42,8 @@ from label_studio_ml.model import LabelStudioMLBase
 from label_studio_ml.response import ModelResponse
 from label_studio_sdk.converter import brush
 from pyconvert.lib import pyconvert
+from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from tsam.config import Config
 from tsam.data import INPUT_SIZE, instances, label_name
@@ -326,10 +328,9 @@ class NewModel(LabelStudioMLBase):
         )
         backfill = submitted if limit is None else submitted[max(len(submitted) - limit, 0) :]
         logger.info(f"Backfilling {len(backfill)} of {len(submitted)} annotations of project {project['title']}")
-        for i, (annotation, task) in enumerate(backfill, 1):
-            model.fit("ANNOTATION_CREATED", {"annotation": annotation, "task": task})
-            if i % 10 == 0 or i == len(backfill):
-                logger.info(f"Backfill: {i}/{len(backfill)} annotations queued; training runs in the background")
+        with logging_redirect_tqdm():  # other log lines (the updates', in the background) print above the bar
+            for annotation, task in tqdm(backfill, desc="Backfill", unit="annotation"):
+                model.fit("ANNOTATION_CREATED", {"annotation": annotation, "task": task})
 
     def setup(self):
         """Report the online-training run as the model version, so predictions say which model made them."""
@@ -345,11 +346,6 @@ class NewModel(LabelStudioMLBase):
         task_data = data["task"]["data"]
         pairs = self.handler.annotation_pairs(task_data, task_data[value], data["annotation"]["result"], self.trainer)
         self.trainer.add(pairs)
-        queued, needed = len(self.trainer.queue), self.trainer.config.trainer.samples_per_update
-        logger.info(
-            f"Annotation {data['annotation']['id']} (task {data['task']['id']}): {len(pairs)} training pairs; "
-            f"{queued}/{needed} annotations toward the next update"
-        )
 
     def predict(self, tasks: list[dict], context: dict | None = None, **kwargs) -> ModelResponse:
         """Returns the mask for the latest box drawn on this image."""

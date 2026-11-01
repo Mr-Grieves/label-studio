@@ -38,7 +38,7 @@ Training on each new batch of 16-32 labels alone would make the model chase what
 - **How it is used:** each minibatch has `replay.ratio` replayed pairs per new pair (e.g. 1.0: half of it replayed), drawn uniformly from the buffer. The first update, with an empty buffer, trains on new pairs only.
 - **What gets added:** after a training step, the new batch's records are added to the buffer, whether or not the updated model is accepted. A rejected update means the weights got worse, not that the labels were wrong, so later steps still learn from them.
 - **Persistence:** the buffer is saved with each accepted checkpoint, so a restarted backend carries on where it left off (see Checkpointing and resuming).
-- **No cached embeddings:** pairs are augmented (see below), so every pair goes through the frozen image encoder. A step takes several seconds, mostly fetching prescan images from S3 and augmenting them.
+- **No cached embeddings:** pairs are augmented (see below), so every pair goes through the frozen image encoder. The prescan images are cached in memory instead (256 KB each): fetching a step's images from S3 took several seconds, leaving the GPU idle.
 
 Config key: `replay.ratio`.
 
