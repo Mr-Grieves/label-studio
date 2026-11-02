@@ -1,0 +1,6 @@
+# Serves the model frozen: no trainer_config, so no training, testing or MLflow run.
+description: T-SAM served frozen
+version: 0.3.0
+
+model_config:
+  base_run_id: 38766a3324284797a162c6cd43ca0250 # tmode_boxes_v2_b32_context
