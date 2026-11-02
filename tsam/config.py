@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Strict(BaseModel):
@@ -13,13 +13,8 @@ class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class StructuresConfig(Strict):
-    conditioning: bool  # a learned offset per structure, added to its boxes' prompt embeddings
-    mapping: dict[str, list[str]]  # structure -> its label names, without their tool suffix ("ATFL [SAM]" -> ATFL)
-
-
 class SAMConfig(Strict):
-    base_run_id: str  # the MLflow run of the generic T-SAM to start from
+    base_run_id: str  # the MLflow run of the generic T-SAM to start from: one with structures (structures.py)
     prompt_encoder_frozen: bool = False
 
 
@@ -33,7 +28,7 @@ class OptimizerConfig(BaseModel):
 
 
 class ReplayConfig(Strict):
-    ratio: float  # replayed pairs per new pair in each minibatch
+    ratio: float  # replayed annotations per new one in each minibatch
 
 
 class LossConfig(Strict):
@@ -45,8 +40,8 @@ class LossConfig(Strict):
 class TrainerConfig(Strict):
     samples_per_update: int  # submitted annotations per update
     backfill_limit: int | None  # a new run first trains on the project's latest this many annotations; null: all
-    minibatch_size: int  # image+label pairs per gradient step
-    steps_per_update: int  # gradient steps per update, each on a minibatch drawn from its new and replayed pairs
+    minibatch_size: int  # pairs per gradient step, one drawn from each of as many annotations
+    steps_per_update: int  # gradient steps per update, each on a minibatch drawn from its new and replayed annotations
     box_jitter: float
     replay: ReplayConfig
     augmentation: list[dict[str, dict[str, Any]]]  # keras.layers class name -> its arguments
@@ -59,20 +54,30 @@ class TestConfig(Strict):
     acceptance_threshold: float  # the most an update may drop the test IoU below the best so far
 
 
+# Needed only to train: a config without trainer_config serves the model frozen (e.g. configs/frozen.yaml)
+TRAINING = ("project_id", "experiment_name", "run_name", "optimizer", "test")
+
+
 class Config(Strict):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    project_id: int
     description: str
-    experiment_name: str
-    run_name: str
     version: str
-    continue_run_id: str | None = None
-    structures: StructuresConfig
+    continue_run_id: str | None = None  # resume this run; when frozen, serve its model
     sam: SAMConfig = Field(alias="model_config")  # `model_config` is pydantic's own name
-    optimizer: OptimizerConfig = Field(alias="optimizer_config")
-    trainer: TrainerConfig = Field(alias="trainer_config")
-    test: TestConfig = Field(alias="test_config")
+    trainer: TrainerConfig | None = Field(None, alias="trainer_config")
+    project_id: int | None = None
+    experiment_name: str | None = None
+    run_name: str | None = None
+    optimizer: OptimizerConfig | None = Field(None, alias="optimizer_config")
+    test: TestConfig | None = Field(None, alias="test_config")
+
+    @model_validator(mode="after")
+    def training_is_complete(self) -> "Config":
+        missing = [name for name in TRAINING if getattr(self, name) is None]
+        if self.trainer and missing:
+            raise ValueError(f"Training (trainer_config) also needs {', '.join(missing)}")
+        return self
 
 
 def load_config(path: str | Path) -> Config:

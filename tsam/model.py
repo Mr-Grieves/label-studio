@@ -13,8 +13,9 @@ prompt encoder and mask decoder. The cache is in-process, so run this backend wi
 gunicorn worker.
 
 Online training (online.py, online-training.md): Label Studio's webhook on a submitted annotation
-calls fit(), which turns its polygons into training pairs and queues them; predictions use the
-trainer's live decoder, with the box's structure. A new run first backfills: it feeds the project's
+calls fit(), which turns its polygons into a training record and queues it; predictions use the
+trainer's live decoder (with no `trainer_config`, the frozen model's), with the box's structure (structures.py) and the masks already accepted on
+the image, which the accepted-context.js plugin adds to the request. A new run first backfills: it feeds the project's
 latest annotations through fit() at startup, as if they had just been submitted.
 
 Preprocessing matches isonoai's training pipeline: grayscale, /255, bilinear resize to 256x256.
@@ -46,8 +47,9 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from tsam.config import Config
-from tsam.data import INPUT_SIZE, instances, label_name
-from tsam.online import OnlineTrainer
+from tsam.data import INPUT_SIZE, instances, rasterize
+from tsam.online import Decoder, OnlineTrainer
+from tsam.structures import label_name, structure
 from tsam.utils.pyconvert_utils import (
     convert_mask_to_postscan,
     convert_point_to_prescan,
@@ -57,7 +59,7 @@ from tsam.utils.pyconvert_utils import (
 from tsam.utils.s3_utils import get_s3_client
 
 # Importing it registers the SAM classes with Keras, so the saved model can be rebuilt
-from tsam.utils.sam import VIT_LAYERS
+from tsam.utils.sam import EXCLUDED_LOGIT, VIT_LAYERS
 from tsam.utils.urls import extract_s3_key_from_url
 
 logger = logging.getLogger(__name__)
@@ -113,7 +115,9 @@ def largest_component(mask: np.ndarray) -> np.ndarray:
 def refine_logits(logits: np.ndarray) -> np.ndarray:
     """Smooth the (256, 256) logits and keep only the largest connected foreground component."""
     if SMOOTH_SIGMA > 0:
-        logits = cv2.GaussianBlur(logits, (0, 0), SMOOTH_SIGMA)
+        # The accepted masks' EXCLUDED_LOGIT raised to the lowest other logit, so it doesn't blur far into the mask
+        floor = np.min(logits, where=logits > EXCLUDED_LOGIT, initial=0)
+        logits = cv2.GaussianBlur(np.maximum(logits, floor), (0, 0), SMOOTH_SIGMA)
     # Dropped components become background with the same confidence.
     return np.where(largest_component(logits > 0), logits, -np.abs(logits))
 
@@ -236,26 +240,31 @@ class TSAMHandler:
             return None
         return np.array([x0, y0, x1, y1], dtype=np.float32)
 
-    def annotation_pairs(self, task_data: dict, image_url: str, results: list[dict], trainer: OnlineTrainer) -> list:
-        """A submitted annotation's training pairs: one per instance of each mapped label, i.e. per component of its
-        polygons on the image (data.py). Polygons that don't convert to the prescan frame are left out."""
-        prescan_key, blob_key, ts = self.locate(task_data, image_url)
+    def polygons(self, results: list[dict], blob_key: str, timestamp: int) -> dict[str, list]:
+        """Label Studio polygon results -> their polygons in the model's 256 frame, by label name. Labels in no
+        structure (structures.py), and polygons that don't convert to the prescan frame, are left out."""
         polygons = defaultdict(list)
         for result in results:
-            if result["type"] != "polygonlabels":
-                continue
-            name = label_name(result["value"]["polygonlabels"][0])
-            if name not in trainer.label_structure:
+            if result["type"] != "polygonlabels" or not structure(label := result["value"]["polygonlabels"][0]):
                 continue
             postscan = np.array(result["value"]["points"]) / 100 * [LS_WIDTH, LS_HEIGHT]
-            points = self.to_model_frame(postscan, blob_key, ts)
+            points = self.to_model_frame(postscan, blob_key, timestamp)
             if points is not None:
-                polygons[name].append(points.tolist())
-        return [
-            {"image": prescan_key, "structure": trainer.label_structure[name], "polygons": instance}
-            for name, p in polygons.items()
-            for instance in instances(p)
-        ]
+                polygons[label_name(label)].append(points.tolist())
+        return polygons
+
+    def annotation(self, task_data: dict, image_url: str, results: list[dict]) -> dict:
+        """A submitted annotation as a training record (data.py): its image, and an instance per component of each
+        label's polygons on it."""
+        prescan_key, blob_key, ts = self.locate(task_data, image_url)
+        return {
+            "image": prescan_key,
+            "instances": [
+                {"structure": structure(name), "polygons": instance}
+                for name, p in self.polygons(results, blob_key, ts).items()
+                for instance in instances(p)
+            ],
+        }
 
     def convert_mask_to_postscan(self, logits: np.ndarray, blob_key: str, timestamp: int) -> np.ndarray:
         """(256, 256) logits from the model's frame -> binary mask in the post-scan frame."""
@@ -300,7 +309,8 @@ class NewModel(LabelStudioMLBase):
 
     # Set once at startup by main.py (`NewModel.configure`), before the server takes requests.
     handler: TSAMHandler | None = None
-    trainer: OnlineTrainer | None = None
+    trainer: OnlineTrainer | None = None  # None with online training disabled
+    decoder: OnlineTrainer | Decoder | None = None  # what predictions use: the trainer's live decoder, or the frozen one
 
     @classmethod
     def configure(cls, config: Config) -> None:
@@ -310,9 +320,14 @@ class NewModel(LabelStudioMLBase):
         gpus = [device.name for device in tf.config.list_logical_devices("GPU")]
         logger.info(f"TensorFlow runs on {', '.join(gpus) or 'the CPU only'}")
         cls.handler = TSAMHandler(config.continue_run_id or config.sam.base_run_id, EMBEDDING_CACHE_SIZE)
-        cls.trainer = OnlineTrainer(config, cls.handler.sam, lambda key: cls.handler.preprocess_img(key)[0])
-        if not config.continue_run_id:
-            cls.backfill(config.trainer.backfill_limit)
+        sam = cls.handler.sam
+        if not config.trainer:
+            logger.info("Online training is disabled: serving the frozen model")
+            cls.decoder = Decoder(sam.prompt_encoder, sam.mask_decoder)
+        else:
+            cls.trainer = cls.decoder = OnlineTrainer(config, sam, lambda key: cls.handler.preprocess_img(key)[0])
+            if not config.continue_run_id:
+                cls.backfill(config.trainer.backfill_limit)
         logger.info(f"Ready for Label Studio after {time.perf_counter() - start:.0f}s")
 
     @classmethod
@@ -334,18 +349,17 @@ class NewModel(LabelStudioMLBase):
 
     def setup(self):
         """Report the online-training run as the model version, so predictions say which model made them."""
-        self.set("model_version", f"tsam-{self.trainer.run_id}")
+        self.set("model_version", f"tsam-{self.trainer.run_id if self.trainer else 'frozen'}")
 
     def fit(self, event: str, data: dict, **kwargs) -> None:
         """Queue a submitted annotation's labels for online training (Label Studio's webhook)."""
         if event not in ("ANNOTATION_CREATED", "ANNOTATION_UPDATED"):
             return
-        if int(self.project_id) != self.trainer.config.project_id:
+        if not self.trainer or int(self.project_id) != self.trainer.config.project_id:
             return
         _, _, value = self.get_first_tag_occurence("PolygonLabels", "Image")
         task_data = data["task"]["data"]
-        pairs = self.handler.annotation_pairs(task_data, task_data[value], data["annotation"]["result"], self.trainer)
-        self.trainer.add(pairs)
+        self.trainer.add(self.handler.annotation(task_data, task_data[value], data["annotation"]["result"]))
 
     def predict(self, tasks: list[dict], context: dict | None = None, **kwargs) -> ModelResponse:
         """Returns the mask for the latest box drawn on this image."""
@@ -375,9 +389,14 @@ class NewModel(LabelStudioMLBase):
             return ModelResponse(predictions=[])
         label = box["value"]["rectanglelabels"][0]
 
-        # The trainer's live decoder, with the box's structure (None if its label isn't mapped: no offset)
-        structure = self.trainer.label_structure.get(label_name(label))
-        logits, iou = self.trainer.predict(embeddings, tf.constant(model_box[None]), structure)
+        # The masks already accepted on the image (the plugin accepted-context.js sends them): the new one may not
+        # overlap them, and the model takes them into account; each pixel the structure of its mask
+        accepted = np.zeros((INPUT_SIZE, INPUT_SIZE), np.int32)
+        for name, polygons in self.handler.polygons(context.get("accepted", []), blob_key, ts).items():
+            accepted = np.maximum(accepted, structure(name) * rasterize(polygons))
+
+        # The trainer's live decoder or the frozen one, with the box's structure ("Anything" if its label is in none)
+        logits, iou = self.decoder.predict(embeddings, tf.constant(model_box[None]), structure(label), accepted)
         # Smooth and keep the largest component.
         logits = refine_logits(logits[0].astype(np.float32))
 

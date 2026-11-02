@@ -16,15 +16,17 @@ import pytest
 import tensorflow as tf
 
 from tsam.config import Config
+from tsam.structures import SAM_STRUCTURES, structure
 from tsam.utils.sam import SAM, MaskDecoder, PromptEncoder
 
 DIM = 32  # small, for speed; the real T-SAM's is 256
+SKIN, FIBROUS = structure("Skin"), structure("Tendon")
 
 
 def tiny_sam() -> SAM:
     """A SAM with the real prompt encoder and mask decoder, and a one-layer image encoder: 256 frame, 64 grid."""
     encoder = keras.Sequential([keras.Input((256, 256, 1)), keras.layers.Conv2D(DIM, 4, strides=4)])
-    return SAM(encoder, PromptEncoder(dim=DIM), MaskDecoder(dim=DIM, heads=2))
+    return SAM(encoder, PromptEncoder(dim=DIM, structures=list(SAM_STRUCTURES)), MaskDecoder(dim=DIM, heads=2))
 
 
 def blob(mask: np.ndarray, x: int, y: int, size: int) -> np.ndarray:
@@ -38,8 +40,8 @@ def png(array: np.ndarray) -> tf.train.Feature:
 
 @pytest.fixture
 def test_tfrecord(tmp_path):
-    """3 images, each with one Skin instance, two separate Tendon instances (and a speck under MIN_PIXELS), and an
-    unmapped label: 9 test pairs."""
+    """3 images, each with one Skin instance, two separate Tendon instances (and a speck under MIN_PIXELS), and a
+    label in no structure: 9 test pairs."""
     path = tmp_path / "test.tfrecord"
     rng = np.random.default_rng(0)
     with tf.io.TFRecordWriter(str(path)) as writer:
@@ -67,7 +69,6 @@ def config(test_tfrecord) -> Config:
             "experiment_name": "test",
             "run_name": "test",
             "version": "0",
-            "structures": {"conditioning": True, "mapping": {"Skin": ["Skin"], "Tendon": ["Tendon", "FDT"]}},
             "model_config": {"base_run_id": "base"},
             "optimizer_config": {"name": "adamw", "learning_rate": 1e-4},
             "trainer_config": {
@@ -108,5 +109,7 @@ def square(x: float, y: float, size: float) -> list:
     return [[x, y], [x + size, y], [x + size, y + size], [x, y + size]]
 
 
-def pair(image: str, structure: int, x: float = 60, y: float = 60, size: float = 40) -> dict:
-    return {"image": image, "structure": structure, "polygons": [square(x, y, size)]}
+def annotation(image: str, *structures: int) -> dict:
+    """A training record (data.py) with a square instance of each structure, side by side."""
+    instances = [{"structure": s, "polygons": [square(10 + 60 * i, 60, 40)]} for i, s in enumerate(structures)]
+    return {"image": image, "instances": instances}

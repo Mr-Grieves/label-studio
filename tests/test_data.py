@@ -1,30 +1,20 @@
-"""data.py: labels, instances, boxes, augmentation, drawing and the test set."""
+"""data.py: instances, accepted masks, boxes, augmentation, drawing and the test set."""
 
 import numpy as np
 import tensorflow as tf
-from conftest import blob, square
+from conftest import FIBROUS, SKIN, blob, square
 
 from tsam.data import (
     augment,
     build_augmentation,
     components,
     draw,
+    draw_accepted,
     instances,
-    label_name,
     mask_box,
     rasterize,
     read_test_set,
-    structure_ids,
 )
-
-
-def test_label_name_strips_tool_suffix():
-    assert label_name("ATFL [SAM]") == "ATFL"
-    assert label_name("Skin") == "Skin"
-
-
-def test_structure_ids_map_every_label_name():
-    assert structure_ids({"Skin": ["Skin"], "Tendon": ["Tendon", "FDT"]}) == {"Skin": 0, "Tendon": 1, "FDT": 1}
 
 
 def test_components_split_a_mask_and_drop_specks():
@@ -40,6 +30,19 @@ def test_instances_group_overlapping_polygons_and_drop_specks():
     groups = instances([*overlapping, separate, speck])
     assert sorted(map(len, groups)) == [1, 2]
     assert all(len(components(rasterize(group))) == 1 for group in groups)
+
+
+def test_accepted_masks_are_a_random_share_of_the_others():
+    around = blob(np.zeros((256, 256), np.uint8), 0, 0, 100)  # the drawn instance lies inside it
+    drawn = blob(np.zeros((256, 256), np.uint8), 20, 20, 20)
+    apart = blob(np.zeros((256, 256), np.uint8), 150, 150, 20)
+    masks, structures = np.stack([around, drawn, apart]) // 255, np.array([SKIN, FIBROUS, FIBROUS])
+    rng = np.random.default_rng(0)
+    draws = [draw_accepted(masks, structures, 1, rng) for _ in range(200)]
+    assert all(not d[masks[0] > 0].any() for d in draws)  # never the one around it, nor itself
+    taken = [d[masks[2] > 0] for d in draws]
+    assert all(np.all(t == 0) or np.all(t == FIBROUS) for t in taken)  # its structure, where it is
+    assert 50 < sum(t.any() for t in taken) < 150  # accepted about half the time: P(u < p), u and p uniform
 
 
 def test_mask_box_is_the_mask_extremes():
@@ -84,8 +87,17 @@ def test_draw_rotates_clockwise():
 
 
 def test_test_set_has_one_pair_per_component(test_tfrecord):
-    t = read_test_set([test_tfrecord], {"Skin": 0, "Tendon": 1})
+    t = read_test_set([test_tfrecord])
     assert t["images"].shape == (3, 256, 256, 1)
-    assert np.bincount(t["structure"]).tolist() == [3, 6]  # 1 Skin and 2 Tendons per image; speck and Unmapped out
+    # 1 Skin and 2 Tendons per image; the speck and the label in no structure are left out
+    assert sorted(t["structure"].tolist()) == [SKIN] * 3 + [FIBROUS] * 6
     assert all(len(components(mask)) == 1 for mask in t["mask"])
     assert t["image"].tolist() == [0, 0, 0, 1, 1, 1, 2, 2, 2]
+
+
+def test_test_set_accepted_masks_are_the_frames_others_and_fixed(test_tfrecord):
+    t = read_test_set([test_tfrecord])
+    assert t["accepted"].shape == t["mask"].shape
+    assert not np.any((t["accepted"] > 0) & (t["mask"] > 0))  # the instances don't overlap: never its own pixels
+    assert set(np.unique(t["accepted"])) <= {0, SKIN, FIBROUS} and t["accepted"].any()
+    assert np.array_equal(read_test_set([test_tfrecord])["accepted"], t["accepted"])

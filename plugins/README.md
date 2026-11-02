@@ -6,6 +6,7 @@ interactive clicks. Each file is self-contained.
 | File | What it does |
 |---|---|
 | `on-accept.js` | When a predicted mask is accepted: cuts out pixels other regions already cover, turns it into a polygon, and deletes the smart clicks so they don't prompt the next mask |
+| `accepted-context.js` | Adds the polygons already on the image to each prediction request, as T-SAM's accepted masks (Label Studio sends only the smart boxes) |
 | `on-reject.js` | When a predicted mask is rejected with its ✗, deletes the smart clicks (Label Studio's "reject all" already does) |
 | `prediction-alpha.js` | A slider for the opacity of the predicted (not yet accepted) mask |
 | `click-colours.js` | Colours foreground clicks green and background (alt-)clicks red |
@@ -70,3 +71,5 @@ yet run:
   timer in `on-accept.js`;
 - whether `annotation.createResult()` takes the polygon's points in percent, as
   saved results store them.
+- whether Label Studio's API client sends the prediction request through
+  `window.fetch` with a JSON string body, which `accepted-context.js` relies on.

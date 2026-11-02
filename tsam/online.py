@@ -1,7 +1,7 @@
 """Online training of T-SAM on one Label Studio project, as its labels are submitted (see online-training.md).
 
-The image encoder stays frozen, shared with serving. Training updates a copy of the prompt encoder and mask decoder,
-plus a learned offset per structure. An update whose test IoU stays within the acceptance threshold of the best so far
+The image encoder stays frozen, shared with serving. Training updates a copy of the prompt encoder and mask decoder.
+An update whose test IoU stays within the acceptance threshold of the best so far
 is copied into the live copy that predictions use, and logged to the project's MLflow run as isonoai logs its models;
 otherwise training is rolled back to the last accepted state.
 """
@@ -25,12 +25,14 @@ import tensorflow as tf
 
 import tsam.utils
 from tsam.config import Config
-from tsam.data import augment, build_augmentation, draw, mask_box, rasterize, read_test_set, structure_ids
+from tsam.data import augment, build_augmentation, draw, draw_accepted, mask_box, rasterize, read_test_set
+from tsam.structures import SAM_STRUCTURES
+from tsam.utils.sam import EXCLUDED_LOGIT
 
 logger = logging.getLogger(__name__)
 
 MODEL = "model"  # the run's latest accepted SAM, logged as isonoai logs its models
-CHECKPOINT = "checkpoint"  # what resuming needs besides it: structure offsets, replay buffer, step, best test IoU
+CHECKPOINT = "checkpoint"  # what resuming needs besides it: replay buffer, step, best test IoU
 EXAMPLES = 20  # test images drawn to examples/base (the base T-SAM) and examples/deployed (the latest accepted one)
 
 # mlflow.tensorflow pickles Keras's registered classes along with the model. By value, so that isonoai, which has no
@@ -76,25 +78,33 @@ def clone(module: keras.Model) -> keras.Model:
 
 
 class Decoder:
-    """T-SAM's prompt encoder and mask decoder, with a learned offset per structure added to the box's embeddings."""
+    """T-SAM's prompt encoder and mask decoder: its whole pass after the image encoder."""
 
-    def __init__(self, prompt_encoder: keras.Model, mask_decoder: keras.Model, structures: int, conditioning: bool):
+    def __init__(self, prompt_encoder: keras.Model, mask_decoder: keras.Model):
         self.prompt_encoder, self.mask_decoder = prompt_encoder, mask_decoder
-        self.offsets = tf.Variable(tf.zeros((structures, prompt_encoder.dim))) if conditioning else None
 
-    def __call__(self, embeddings, boxes, structures=None, training=False) -> tuple[tf.Tensor, tf.Tensor]:
-        """Mask logits (B, 256, 256) and predicted IoU (B,) for (B, 4) boxes on (B, E, E, dim) embeddings.
-        `structures` (B,) picks each box's offset; None for no offset."""
-        prompts = self.prompt_encoder({"boxes": boxes}, training=training)
-        if self.offsets is not None and structures is not None:
-            prompts["prompt_sparse_embeddings"] += tf.gather(self.offsets, structures)[:, None]
+    def __call__(self, embeddings, boxes, structures, accepted, training=False) -> tuple[tf.Tensor, tf.Tensor]:
+        """Mask logits (B, 256, 256) and predicted IoU (B,) for (B, 4) boxes of (B,) structures on (B, E, E, dim)
+        embeddings, given the (B, 256, 256) map of the accepted masks' structures; the logits are EXCLUDED_LOGIT on
+        those masks, as in the SAM model's own pass."""
+        prompts = {"boxes": boxes, "structures": structures, "accepted": accepted}
+        prompts = self.prompt_encoder(prompts, training=training)
+        excluded = prompts.pop("excluded")
         outputs = self.mask_decoder({"image_embeddings": embeddings, **prompts}, training=training)
-        return outputs["mask"][:, 0], outputs["iou"][:, 0]
+        return tf.where(excluded, EXCLUDED_LOGIT, outputs["mask"][:, 0]), outputs["iou"][:, 0]
+
+    def predict(
+        self, embeddings: tf.Tensor, boxes: tf.Tensor, structure: int, accepted: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Mask logits and predicted IoU for boxes of one structure (0: "Anything") on one image, given the
+        (256, 256) map of its accepted masks' structures."""
+        n = len(boxes)
+        logits, iou = self(embeddings, boxes, tf.fill([n], structure), np.repeat(accepted[None], n, axis=0))
+        return np.asarray(logits), np.asarray(iou)
 
     @property
     def variables(self) -> list[tf.Variable]:
-        offsets = [self.offsets] if self.offsets is not None else []
-        return self.prompt_encoder.weights + self.mask_decoder.weights + offsets
+        return self.prompt_encoder.weights + self.mask_decoder.weights
 
 
 class OnlineTrainer:
@@ -107,32 +117,32 @@ class OnlineTrainer:
         # Kept in memory (256 KB each): every step loads its minibatch's images, mostly ones loaded before, and S3 takes
         # ~0.1 s per image, many times the GPU's time for the step.
         self.load_image = functools.cache(load_image)
-        self.structures = list(config.structures.mapping)
-        self.label_structure = structure_ids(config.structures.mapping)
-        n, conditioning = len(self.structures), config.structures.conditioning
-        self.live = Decoder(sam.prompt_encoder, sam.mask_decoder, n, conditioning)
-        self.train = Decoder(clone(sam.prompt_encoder), clone(sam.mask_decoder), n, conditioning)
+        self.structures = sam.prompt_encoder.structures
+        if self.structures != list(SAM_STRUCTURES):  # the model's structure embeddings are by index
+            raise ValueError(f"The model's structures, {self.structures}, aren't tsam/structures.py's")
+        self.live = Decoder(sam.prompt_encoder, sam.mask_decoder)
+        self.train = Decoder(clone(sam.prompt_encoder), clone(sam.mask_decoder))
         self.lock = threading.Lock()  # the live decoder is updated while predictions use it
 
         self.augmentation = build_augmentation(config.trainer.augmentation)
         self.losses = [(loss.weight, LOSSES[loss.key, loss.name]) for loss in config.trainer.loss_function]
         trained = [self.train.mask_decoder] + ([] if config.sam.prompt_encoder_frozen else [self.train.prompt_encoder])
-        offsets = [self.train.offsets] if conditioning else []
-        self.trainable = [w for module in trained for w in module.trainable_variables] + offsets
+        self.trainable = [w for module in trained for w in module.trainable_variables]
         opt = config.optimizer
         self.optimizer = keras.optimizers.get(
             {"class_name": opt.name, "config": {"learning_rate": opt.learning_rate, **opt.model_extra}}
         )
         self.optimizer.build(self.trainable)
 
-        self.buffer: list[dict] = []  # every pair trained on so far (the replay buffer)
-        self.queue: list[list[dict]] = []  # pairs of each submitted annotation waiting for the next update
+        self.buffer: list[dict] = []  # every annotation trained on so far (the replay buffer), as data.py's records
+        self.queue: list[dict] = []  # submitted annotations waiting for the next update
+        self.rng = np.random.default_rng()  # draws the accepted masks
         self.queue_lock = threading.Lock()
         self.updating = False
         self.step = 0  # updates so far: the step of every logged metric
 
         # The image encoder is frozen and test images aren't augmented, so their embeddings are computed once
-        self.test_set = read_test_set(config.test.dataset_paths, self.label_structure)
+        self.test_set = read_test_set(config.test.dataset_paths)
         images = self.test_set["images"]  # kept for the examples
         logger.info(f"Test set: {len(self.test_set['image'])} instances on {len(images)} images; embedding them")
         self.test_set["embeddings"] = np.concatenate(
@@ -155,18 +165,18 @@ class OnlineTrainer:
         self.accepted = self._state()
         logger.info(f"Online training into MLflow run {self.run_id}, from step {self.step}; test IoU {self.best:.4f}")
 
-    def predict(self, embeddings: tf.Tensor, boxes: tf.Tensor, structure: int | None) -> tuple[np.ndarray, np.ndarray]:
-        """The live decoder's mask logits and predicted IoU for boxes of one structure (None: no offset)."""
-        structures = None if structure is None else tf.fill([len(boxes)], structure)
+    def predict(
+        self, embeddings: tf.Tensor, boxes: tf.Tensor, structure: int, accepted: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The live decoder's prediction (Decoder.predict)."""
         with self.lock:
-            logits, iou = self.live(embeddings, boxes, structures)
-        return np.asarray(logits), np.asarray(iou)
+            return self.live.predict(embeddings, boxes, structure, accepted)
 
-    def add(self, pairs: list[dict]) -> None:
-        """Queue one submitted annotation's pairs; each update takes the first `samples_per_update` queued."""
-        if pairs:
+    def add(self, annotation: dict) -> None:
+        """Queue a submitted annotation (data.py's record); each update takes the first `samples_per_update` queued."""
+        if annotation["instances"]:
             with self.queue_lock:
-                self.queue.append(pairs)
+                self.queue.append(annotation)
             self._start_update()
 
     def _start_update(self) -> None:
@@ -175,11 +185,11 @@ class OnlineTrainer:
             if self.updating or len(self.queue) < n:
                 return
             annotations, self.queue, self.updating = self.queue[:n], self.queue[n:], True
-        threading.Thread(target=self._update, args=([p for a in annotations for p in a],), daemon=True).start()
+        threading.Thread(target=self._update, args=(annotations,), daemon=True).start()
 
     def _update(self, new: list[dict]) -> None:
-        """`steps_per_update` gradient steps, each on new and replayed pairs drawn at random (with replacement, so the
-        same number of steps however many pairs there are); then accept it, or roll it back."""
+        """`steps_per_update` gradient steps, each on new and replayed annotations drawn at random (with replacement,
+        so the same number of steps however many there are); then accept it, or roll it back."""
         try:
             t, start, replay, best = self.config.trainer, time.perf_counter(), len(self.buffer), self.best
             n_replay = round(t.minibatch_size * t.replay.ratio / (1 + t.replay.ratio)) if self.buffer else 0
@@ -203,13 +213,13 @@ class OnlineTrainer:
                 metrics,
                 train_loss=float(np.mean(losses)),
                 accepted=float(accepted),
-                new_pairs=len(new),
-                buffer_pairs=len(self.buffer),
+                new_annotations=len(new),
+                buffer_annotations=len(self.buffer),
             )
             outcome, iou = "accepted" if accepted else "rolled back", metrics["test_iou"]
             logger.info(
                 f"Update {self.step}: loss {np.mean(losses):.4f}, test IoU {iou:.4f} (best {best:.4f}), {outcome}, "
-                f"in {time.perf_counter() - start:.0f}s ({len(new)} new pairs, {replay} in replay)"
+                f"in {time.perf_counter() - start:.0f}s ({len(new)} new annotations, {replay} in replay)"
             )
         except Exception:
             logger.exception("Online update failed")
@@ -218,32 +228,47 @@ class OnlineTrainer:
                 self.updating = False
         self._start_update()  # in case enough annotations arrived meanwhile
 
-    def _train_step(self, pairs: list[dict]) -> float:
-        """One gradient step on a minibatch of pairs, each freshly augmented."""
-        image = {key: self.load_image(key) for key in {p["image"] for p in pairs}}
-        images = tf.stack([image[p["image"]] for p in pairs])
-        masks = tf.constant(np.stack([rasterize(p["polygons"]) for p in pairs])[..., None], tf.float32)
-        images, masks = augment(self.augmentation, images, masks)
-        keep = tf.reduce_sum(masks, axis=[1, 2, 3]) > 0  # augmentation can shift a mask out of the frame
-        images, masks = images[keep], masks[keep][..., 0]
-        structures = tf.constant([p["structure"] for p in pairs])[keep]
+    def _train_step(self, annotations: list[dict]) -> float:
+        """One gradient step on a pair drawn from each of a minibatch of annotations: a random instance, with a random
+        share of the others accepted (draw_accepted); each freshly augmented, its accepted masks with it."""
+        image = {key: self.load_image(key) for key in {a["image"] for a in annotations}}
+        images = tf.stack([image[a["image"]] for a in annotations])
+        one_hot = np.eye(len(self.structures), dtype=np.uint8)
+        structures, layers = [], []  # each pair's structure, and its mask and accepted masks as channels
+        for annotation in annotations:
+            masks = np.stack([rasterize(instance["polygons"]) for instance in annotation["instances"]])
+            ids = np.array([instance["structure"] for instance in annotation["instances"]])
+            i = random.randrange(len(masks))
+            # One-hot, so augmentation moves each structure's accepted pixels as it moves the mask
+            accepted = one_hot[draw_accepted(masks, ids, i, self.rng)][..., 1:]
+            structures.append(ids[i])
+            layers.append(np.concatenate([masks[i, ..., None], accepted], axis=-1))
+        images, layers = augment(self.augmentation, images, tf.constant(np.stack(layers), tf.float32))
+        keep = tf.reduce_sum(layers[..., 0], axis=[1, 2]) > 0  # augmentation can shift a mask out of the frame
+        images, layers, structures = images[keep], layers[keep], tf.constant(structures)[keep]
+        masks = layers[..., 0]
+        accepted = tf.cast(tf.reduce_max(layers[..., 1:] * tf.range(1.0, len(self.structures)), axis=-1), tf.int32)
         boxes = mask_box(masks, self.config.trainer.box_jitter)
+        # As isonoai trains: against the best mask the model may give, the mask less the accepted ones
+        target = masks * tf.cast(accepted == 0, tf.float32)
 
         embeddings = self.encoder(images, training=False)
         with tf.GradientTape() as tape:
-            logits, iou = self.train(embeddings, boxes, structures, training=True)
-            loss = sum(weight * fn(logits, iou, masks) for weight, fn in self.losses)
+            logits, iou = self.train(embeddings, boxes, structures, accepted, training=True)
+            loss = sum(weight * fn(logits, iou, target) for weight, fn in self.losses)
         self.optimizer.apply_gradients(zip(tape.gradient(loss, self.trainable), self.trainable))
         return float(loss)
 
     def test(self, decoder: Decoder) -> dict[str, float]:
-        """Mean test IoU over every test pair (`test_iou`), and per structure (`test_iou/<structure>`)."""
+        """Mean test IoU over every test pair (`test_iou`), and per structure (`test_iou/<structure>`); against the
+        whole mask, as isonoai's SAMTester scores."""
         t, size = self.test_set, self.config.test.batch_size
         ious = []
         for i in range(0, len(t["image"]), size):
             masks = tf.constant(t["mask"][i : i + size], tf.float32)
             embeddings = t["embeddings"][t["image"][i : i + size]]
-            logits, _ = decoder(embeddings, mask_box(masks), tf.constant(t["structure"][i : i + size]))
+            structures, accepted = t["structure"][i : i + size], t["accepted"][i : i + size]
+            logits, _ = decoder(embeddings, mask_box(masks), structures, accepted)
             ious.append(mask_iou(logits, masks).numpy())
         ious = np.concatenate(ious)
         metrics = {"test_iou": float(ious.mean())}
@@ -271,9 +296,6 @@ class OnlineTrainer:
             mlflow.tensorflow.save_model(self.sam, str(model), pip_requirements=REQUIREMENTS)
             self.mlflow.log_artifacts(self.run_id, str(model), MODEL)
             checkpoint.mkdir()
-            if self.live.offsets is not None:
-                offsets = dict(zip(self.structures, self.live.offsets.numpy().tolist()))
-                (checkpoint / "offsets.json").write_text(json.dumps(offsets))
             (checkpoint / "buffer.json").write_text(json.dumps(self.buffer))
             (checkpoint / "progress.json").write_text(json.dumps({"step": self.step, "best": self.best}))
             self.mlflow.log_artifacts(self.run_id, str(checkpoint), CHECKPOINT)
@@ -288,7 +310,7 @@ class OnlineTrainer:
                 pairs = np.flatnonzero(t["image"] == image)
                 masks, structures = t["mask"][pairs], t["structure"][pairs]
                 boxes = mask_box(tf.constant(masks, tf.float32))
-                logits, _ = self.train(t["embeddings"][t["image"][pairs]], boxes, tf.constant(structures))
+                logits, _ = self.train(t["embeddings"][t["image"][pairs]], boxes, structures, t["accepted"][pairs])
                 boxes, predicted = boxes.numpy(), logits.numpy() > 0
                 panels = [draw(t["images"][image], m, boxes, structures, self.structures) for m in (masks, predicted)]
                 cv2.imwrite(f"{folder}/{image:03d}.png", np.hstack(panels))
@@ -299,10 +321,6 @@ class OnlineTrainer:
 
         The optimizer starts afresh: its state isn't part of the logged model."""
         folder = Path(self.mlflow.download_artifacts(self.run_id, CHECKPOINT))
-        if self.live.offsets is not None:
-            offsets = json.loads((folder / "offsets.json").read_text())
-            for decoder in (self.live, self.train):
-                decoder.offsets.assign([offsets[name] for name in self.structures])
         self.buffer = json.loads((folder / "buffer.json").read_text())
         progress = json.loads((folder / "progress.json").read_text())
         self.step = progress["step"]

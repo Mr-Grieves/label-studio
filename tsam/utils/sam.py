@@ -2,8 +2,9 @@
 
 Every class keeps its `isonoai` registration name -- the saved model refers to them by it -- and their code is
 unchanged, so keep them in sync with isonoai if the architecture changes: they must match the code that trained the
-model being loaded. Currently isonoai's box-only SAM (a box in; no clicks, no mask prompt). Building a SAM from a
-backbone run is left out; `freeze_backbone` stays, since `SAM` calls it when it's built.
+model being loaded. Currently isonoai's box-only SAM with context: a box, its structure and the masks already accepted
+in the frame in; no clicks, no mask prompt. Building a SAM from a backbone run is left out; `freeze_backbone` stays,
+since `SAM` calls it when it's built.
 """
 
 from __future__ import annotations
@@ -29,8 +30,9 @@ VIT_LAYERS = {
 }
 
 SAM_NECK_LAYERNORM_EPS = 1e-6
-CONV_LAYERNORM_EPS = 1e-6  # prompt encoder's mask downscaler and mask decoder's upscaling
+CONV_LAYERNORM_EPS = 1e-6  # mask decoder's upscaling
 TRANSFORMER_LAYERNORM_EPS = 1e-5  # mask decoder's two-way transformer
+EXCLUDED_LOGIT = -1e4  # The mask logit of a pixel the mask may not take: never in it, and no gradient
 
 
 def _fourier_features(coords: tf.Tensor, gaussian_matrix: tf.Tensor) -> tf.Tensor:
@@ -43,9 +45,10 @@ def _fourier_features(coords: tf.Tensor, gaussian_matrix: tf.Tensor) -> tf.Tenso
 class SAM(keras.Model):
     """The full SAM model: image encoder, prompt encoder and mask decoder, each reachable as an attribute.
 
-    Built as a functional model of the whole pass, so it can be exported as is: `images` (B, S, S, 1) and `boxes`
-    (B, 4) in, as (x0, y0, x1, y1) pixels; the `mask` logits (B, 4E, 4E) and its predicted `iou` (B,), an unbounded
-    regression, out.
+    Built as a functional model of the whole pass, so it can be exported as is: `images` (B, S, S, 1), `boxes`
+    (B, 4) as (x0, y0, x1, y1) pixels and, if the prompt encoder has structures, each box's `structures` (B,) index
+    and the `accepted` (B, S, S) map of the accepted masks' structures in; the `mask` logits (B, 4E, 4E),
+    `EXCLUDED_LOGIT` wherever the mask may not go, and its predicted `iou` (B,), an unbounded regression, out.
 
     Args:
         image_encoder: Maps images (B, H, W, 1) to embeddings (B, E, E, dim).
@@ -67,9 +70,16 @@ class SAM(keras.Model):
     ) -> None:
         size = prompt_encoder.input_image_size
         inputs = {"images": keras.Input((size, size, 1), name="images"), "boxes": keras.Input((4,), name="boxes")}
-        prompts = prompt_encoder({"boxes": inputs["boxes"]})
+        if prompt_encoder.structures:
+            inputs["structures"] = keras.Input((), dtype="int32", name="structures")
+            inputs["accepted"] = keras.Input((size, size), dtype="int32", name="accepted")
+        prompts = prompt_encoder({k: v for k, v in inputs.items() if k != "images"})
+        exclusion = prompts.pop("excluded", None)
         outputs = mask_decoder({"image_embeddings": image_encoder(inputs["images"]), **prompts})
-        super().__init__(inputs=inputs, outputs={"mask": outputs["mask"][:, 0], "iou": outputs["iou"][:, 0]}, **kwargs)
+        mask = outputs["mask"][:, 0]
+        if exclusion is not None:
+            mask = keras.ops.where(exclusion, EXCLUDED_LOGIT, mask)
+        super().__init__(inputs=inputs, outputs={"mask": mask, "iou": outputs["iou"][:, 0]}, **kwargs)
 
         self.image_encoder = image_encoder
         self.prompt_encoder = prompt_encoder
@@ -158,23 +168,39 @@ class SamNeck(keras.layers.Layer):
 
 
 @keras.saving.register_keras_serializable(package="isonoai")
-class PromptEncoder(keras.Model):
-    """SAM's prompt encoder, for box prompts only (as in MedSAM).
+class PromptEncoder(keras.Model):  # pylint: disable=too-many-instance-attributes
+    """SAM's prompt encoder, for box prompts only (as in MedSAM), optionally told which structure each box holds.
 
     A box is encoded as SAM encodes one: its two corners, each a positional encoding plus a learned corner embedding.
-    There is no mask prompt, so the dense embedding is SAM's learned "no mask" embedding everywhere.
+    Given `structures`, both corners also get the box's structure's learned embedding, created as zeros, so the decoder
+    can learn each structure's typical shape.
+
+    The dense embedding is SAM's learned "no mask" embedding everywhere. Given `structures`, it also takes the masks
+    already accepted in the frame: each embedding grid cell gets each structure's learned embedding, created as zeros,
+    in proportion to how much of the cell that structure's accepted masks cover, so the decoder can learn how
+    structures lie relative to one another. The box's mask may not overlap them, so their pixels are returned too.
 
     Args:
         dim: Embedding width.
         input_image_size: Size of the (square) frame the box coordinates are given in.
         embedding_size: Size of the (square) image embedding grid.
+        structures: The names of the structures a box can hold, in index order; None for no structure embeddings and
+            no accepted masks.
     """
 
-    def __init__(self, dim: int = 256, input_image_size: int = 256, embedding_size: int = 64, **kwargs) -> None:
+    def __init__(
+        self,
+        dim: int = 256,
+        input_image_size: int = 256,
+        embedding_size: int = 64,
+        structures: list[str] | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self.dim = dim
         self.input_image_size = input_image_size
         self.embedding_size = embedding_size
+        self.structures = structures
 
         normal = keras.initializers.RandomNormal(stddev=1.0)
         self.gaussian_matrix = self.add_weight(
@@ -182,24 +208,47 @@ class PromptEncoder(keras.Model):
         )
         self.corner_embeds = self.add_weight(name="corner_embeds", shape=(2, dim), initializer=normal)  # [TL, BR]
         self.no_mask_embed = self.add_weight(name="no_mask_embed", shape=(dim,), initializer=normal)
+        if structures:
+            self.structure_embeds = self.add_weight(
+                name="structure_embeds", shape=(len(structures), dim), initializer="zeros"
+            )
+            self.accepted_embeds = self.add_weight(  # Row 0 for where nothing is accepted
+                name="accepted_embeds", shape=(len(structures), dim), initializer="zeros"
+            )
         self.built = True
 
     def call(self, inputs: dict[str, tf.Tensor]) -> dict[str, tf.Tensor]:
         """Embed the prompts.
 
         Args:
-            inputs: A dictionary with `boxes` (B, 4): (x0, y0, x1, y1) in pixels of the input frame.
+            inputs: A dictionary with `boxes` (B, 4): (x0, y0, x1, y1) in pixels of the input frame, and optionally
+                `structures` (B,): the index of each box's structure, and with them `accepted` (B, S, S): the index of
+                the structure of the accepted mask at each pixel of the frame, 0 where there is none.
 
         Returns:
             `prompt_sparse_embeddings` (B, 2, dim), `prompt_dense_embeddings` (B, E, E, dim) and
-            `prompt_dense_positional_embeddings` (1, E, E, dim).
+            `prompt_dense_positional_embeddings` (1, E, E, dim); given `accepted`, also `excluded` (B, S, S): the
+            accepted pixels, which the box's mask may not take.
         """
         boxes = inputs["boxes"]
         corners = keras.ops.reshape(boxes, (-1, 2, 2))  # (B, [top-left, bottom-right], (x, y))
         sparse = _fourier_features((corners + 0.5) / self.input_image_size, self.gaussian_matrix) + self.corner_embeds
+        if "structures" in inputs:
+            # Augmentation can cast every label to float
+            structures = keras.ops.cast(inputs["structures"], "int32")
+            sparse += keras.ops.take(self.structure_embeds, structures, axis=0)[:, None]
 
         grid = (keras.ops.shape(boxes)[0], self.embedding_size, self.embedding_size, self.dim)
         dense = keras.ops.broadcast_to(self.no_mask_embed, grid)
+        outputs = {}
+        if "accepted" in inputs:
+            accepted = keras.ops.cast(inputs["accepted"], "int32")
+            # The share of each grid cell each structure's accepted masks cover
+            cover = keras.ops.average_pool(
+                keras.ops.one_hot(accepted, self.accepted_embeds.shape[0]), self.input_image_size // self.embedding_size
+            )
+            dense = dense + keras.ops.matmul(cover, self.accepted_embeds)
+            outputs["excluded"] = accepted > 0
 
         # Positional encoding of every embedding grid cell's centre, for the mask decoder.
         centres = (keras.ops.arange(self.embedding_size, dtype="float32") + 0.5) / self.embedding_size
@@ -210,6 +259,7 @@ class PromptEncoder(keras.Model):
             "prompt_sparse_embeddings": sparse,
             "prompt_dense_embeddings": dense,
             "prompt_dense_positional_embeddings": dense_pe,
+            **outputs,
         }
 
     def get_config(self) -> dict[str, Any]:
@@ -219,6 +269,7 @@ class PromptEncoder(keras.Model):
             "dim": self.dim,
             "input_image_size": self.input_image_size,
             "embedding_size": self.embedding_size,
+            "structures": self.structures,
         }
 
 

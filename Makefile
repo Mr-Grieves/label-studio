@@ -1,7 +1,7 @@
 .PHONY: help install secrets run replay docker-build docker-run
 
 # The online-training config (base model, project, test set...); override with `make run CONFIG=<path>`
-CONFIG ?= tsam/configs/foot-ankle.yaml
+CONFIG ?= tsam/configs/default.yaml
 # Where the config's test tfrecords are (isonoai's /data)
 DATA_DIR ?= /data
 # The host port the backend listens on (Label Studio, or a tunnel, points here)

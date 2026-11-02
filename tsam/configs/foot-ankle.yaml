@@ -5,19 +5,8 @@ run_name: tsam_boxes_foot_ankle_online
 version: 0.3.0
 # continue_run_id: # resume this run instead of starting a new one
 
-structures:
-  conditioning: true # a learned offset per structure
-  mapping: # label names without their tool suffix ("ATFL [SAM]" -> ATFL)
-    Skin: [Skin]
-    Subcutaneous_Layer: [Subcutaneous_Layer]
-    Muscle: [Muscle]
-    Fat: [Fat]
-    Ligament: [ATFL, CFL, ATiFL]
-    Tendon: [PLT, PBT]
-    Bone: [Fibula, Talus, Tibia, Calcaneus, Metatarsal]
-
 model_config:
-  base_run_id: 4b3db0d33d134904a37892a222bb6951
+  base_run_id: 38766a3324284797a162c6cd43ca0250 # tmode_boxes_v2_b32_context
   prompt_encoder_frozen: false
 
 optimizer_config:
@@ -27,11 +16,11 @@ optimizer_config:
 trainer_config:
   samples_per_update: 32
   backfill_limit: 100 # a new run first trains on the project's latest 100 annotations
-  minibatch_size: 32 # image+label pairs per gradient step
-  steps_per_update: 12 # each on a minibatch drawn from the update's new pairs and the replay buffer
+  minibatch_size: 32 # pairs per gradient step, one drawn from each of as many annotations
+  steps_per_update: 12 # each on a minibatch drawn from the update's new annotations and the replay buffer
   box_jitter: 5
   replay:
-    ratio: 1.0 # replayed pairs per new pair in each minibatch
+    ratio: 1.0 # replayed annotations per new one in each minibatch
   augmentation:
     - RandomFlip: {mode: vertical}
     - RandomTranslation: {height_factor: 0.05, width_factor: 0.05, fill_mode: constant}

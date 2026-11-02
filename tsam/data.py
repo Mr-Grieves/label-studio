@@ -1,13 +1,13 @@
 """Training and test data for online training, all in the model's 256 x 256 prescan frame.
 
 A pair is one image and one instance of a structure on it: a connected component of its label's mask, as a user boxes
-it in Label Studio. Training pairs are records {"image": prescan S3 key, "structure": index, "polygons":
-[[[x, y], ...], ...]}, the polygons forming that component, rasterized when used; test pairs are the components of the
-`{label}/pre_scan_mask`s in a tfrecord of them and `pre_scan_image`.
+it in Label Studio, with the frame's other instances that count as already accepted. Training data are submitted
+annotations, as records {"image": prescan S3 key, "instances": [{"structure": index, "polygons": [[[x, y], ...], ...]},
+...]}, the polygons forming each instance, rasterized when used; a pair is drawn from one afresh at every step. Test
+pairs are the components of the `{label}/pre_scan_mask`s in a tfrecord of them and `pre_scan_image`.
 """
 
 import os
-import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -17,18 +17,10 @@ import keras
 import numpy as np
 import tensorflow as tf
 
+from tsam.structures import structure
+
 INPUT_SIZE = 256  # the model's input frame (as trained); boxes are in its pixels
 MIN_PIXELS = 10  # smaller components are left out, as isonoai's SAMDataset leaves out masks
-
-
-def label_name(label: str) -> str:
-    """A Label Studio label without its tool suffix: "ATFL [SAM]" -> "ATFL"."""
-    return re.sub(r"\s*\[[^\]]*\]$", "", label)
-
-
-def structure_ids(mapping: dict[str, list[str]]) -> dict[str, int]:
-    """Label name -> the index of its structure, in the config's order."""
-    return {name: i for i, names in enumerate(mapping.values()) for name in names}
 
 
 def rasterize(polygons: list) -> np.ndarray:
@@ -53,6 +45,20 @@ def instances(polygons: list) -> list[list]:
         if pixels.size:
             groups[np.bincount(pixels).argmax()].append(polygon)
     return [group for group in groups.values() if rasterize(group).sum() >= MIN_PIXELS]
+
+
+def draw_accepted(masks: np.ndarray, structures: np.ndarray, i: int, rng: np.random.Generator) -> np.ndarray:
+    """The accepted masks for instance `i` of a frame's (N, 256, 256) instance masks, drawn as isonoai's SAMDataset
+    draws them: each other instance with the same chance, itself uniform in [0, 1], so training sees every stage of
+    labelling a frame; but never one instance `i` is over half inside (which also rules out `i` itself).
+
+    Returns:
+        (256, 256) int32: the structure of the accepted instance at each pixel (the highest where they overlap), 0 where
+        there is none.
+    """
+    inside = 2 * (masks * masks[i]).sum(axis=(1, 2)) > masks[i].sum()
+    accepted = (rng.random(len(masks)) < rng.random()) & ~inside
+    return (masks * np.where(accepted, structures, 0)[:, None, None]).max(axis=0).astype(np.int32)
 
 
 def mask_box(mask: tf.Tensor, jitter: float = 0.0) -> tf.Tensor:
@@ -125,31 +131,37 @@ def to_model_frame(image: tf.Tensor) -> tf.Tensor:
     return tf.image.resize(tf.cast(image, tf.float32) / 255.0, (INPUT_SIZE, INPUT_SIZE), method="bilinear")
 
 
-def read_test_set(paths: list[Path], label_structure: dict[str, int]) -> dict[str, np.ndarray]:
-    """The test pairs of every mapped label in the tfrecords at `paths` (relative ones under $DATA_DIR): one per
-    component of its mask.
+def read_test_set(paths: list[Path]) -> dict[str, np.ndarray]:
+    """The test pairs of every label in a structure in the tfrecords at `paths` (relative ones under $DATA_DIR): one per
+    component of its mask, with the frame's accepted masks drawn once (draw_accepted, seeded), so every test is alike.
 
     Returns:
-        `images` (N, 256, 256, 1), and per pair: `image` (its index in `images`), `mask` (256, 256) uint8, and
-        `structure`.
+        `images` (N, 256, 256, 1), and per pair: `image` (its index in `images`), `mask` (256, 256) uint8, `structure`,
+        and `accepted` (256, 256) uint8.
     """
+    rng = np.random.default_rng(0)
     images, pairs = [], []
     for path in paths:
         for raw in tf.data.TFRecordDataset(str(Path(os.getenv("DATA_DIR", "/data")) / path)):
             features = tf.train.Example.FromString(raw.numpy()).features.feature
-            for key, feature in features.items():
+            frame = []  # (mask, structure) of each instance
+            for key, feature in sorted(features.items()):  # a fixed order, for the same draws every run
                 label = key.removesuffix("/pre_scan_mask")
-                if label == key or label not in label_structure or not feature.bytes_list.value:
+                if label == key or not structure(label) or not feature.bytes_list.value:
                     continue
                 mask = tf.io.decode_png(feature.bytes_list.value[0], channels=1)
                 mask = tf.image.resize(mask, (INPUT_SIZE, INPUT_SIZE), method="nearest")[..., 0].numpy()
-                pairs += [(len(images), c, label_structure[label]) for c in components(mask)]
-            if pairs and pairs[-1][0] == len(images):  # this record has a pair
-                images.append(to_model_frame(tf_decode_image(features["pre_scan_image"].bytes_list.value[0], 1)))
-    image, mask, structure = zip(*pairs)
+                frame += [(c, structure(label)) for c in components(mask)]
+            if not frame:
+                continue
+            masks, ids = map(np.array, zip(*frame))
+            pairs += [(len(images), m, s, draw_accepted(masks, ids, i, rng)) for i, (m, s) in enumerate(frame)]
+            images.append(to_model_frame(tf_decode_image(features["pre_scan_image"].bytes_list.value[0], 1)))
+    image, mask, structures, accepted = zip(*pairs)
     return {
         "images": np.stack(images),
         "image": np.array(image),
         "mask": np.stack(mask),
-        "structure": np.array(structure),
+        "structure": np.array(structures),
+        "accepted": np.stack(accepted).astype(np.uint8),
     }
